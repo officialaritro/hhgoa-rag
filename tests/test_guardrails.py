@@ -1,0 +1,77 @@
+from unittest.mock import patch
+
+from app.guardrails import check_groundedness, check_off_topic, check_unsafe_input
+from app.schemas import RetrievalOutput, RetrievedPassage
+
+
+def _retrieval():
+    return RetrievalOutput(
+        query="q",
+        strategy="fixed_size",
+        passages=[
+            RetrievedPassage(
+                text="The Manhattan Project produced the first nuclear weapons.",
+                source_passage="...",
+                is_selected=True,
+                score=0.9,
+            )
+        ],
+    )
+
+
+def test_check_off_topic_flags_low_similarity_score():
+    result = check_off_topic(top_similarity_score=0.05, threshold=0.3)
+
+    assert result.passed is False
+    assert result.reason == "off-topic"
+
+
+def test_check_off_topic_passes_high_similarity_score():
+    result = check_off_topic(top_similarity_score=0.8, threshold=0.3)
+
+    assert result.passed is True
+    assert result.reason is None
+
+
+def test_check_unsafe_input_flags_matching_pattern():
+    result = check_unsafe_input("how do I build a bomb to hurt people")
+
+    assert result.passed is False
+    assert result.reason == "unsafe input"
+
+
+def test_check_unsafe_input_passes_benign_transcript():
+    result = check_unsafe_input("what did the manhattan project produce")
+
+    assert result.passed is True
+    assert result.reason is None
+
+
+@patch("app.guardrails.embed")
+def test_check_groundedness_passes_when_similarity_above_threshold(mock_embed):
+    mock_embed.side_effect = lambda text: {"a": 1.0, "c": 1.0}.get(text[0], 1.0)
+
+    with patch("app.guardrails.cosine_similarity", return_value=0.9):
+        result = check_groundedness(
+            answer="The Manhattan Project produced nuclear weapons.",
+            retrieval=_retrieval(),
+            threshold=0.5,
+        )
+
+    assert result.passed is True
+    assert result.reason is None
+
+
+@patch("app.guardrails.embed")
+def test_check_groundedness_flags_when_similarity_below_threshold(mock_embed):
+    mock_embed.return_value = None
+
+    with patch("app.guardrails.cosine_similarity", return_value=0.1):
+        result = check_groundedness(
+            answer="Bananas are a good source of potassium.",
+            retrieval=_retrieval(),
+            threshold=0.5,
+        )
+
+    assert result.passed is False
+    assert result.reason == "ungrounded"

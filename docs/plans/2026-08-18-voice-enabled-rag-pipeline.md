@@ -3,7 +3,7 @@
 Created: 2026-08-18
 Agent: Claude Code
 Status: PENDING
-Approved: No
+Approved: Yes
 Iterations: 0
 Worktree: No
 Type: Feature
@@ -33,7 +33,7 @@ Type: Feature
 ## Global Constraints
 
 - Speech-to-text: ElevenLabs Scribe v2 Realtime, **streaming** (WebSocket) mode — not the blocking REST mode. A blocking call adds the full recording length to measured latency (PRD Engineering Risk 2).
-- Dataset: `ai4bharat/MSMARCO-XI` (Hugging Face), English content only, drawn from the `Eng_Query` / `Eng_Answer` / `English_passages` fields — the dataset has no dedicated `en` config; English content lives embedded inside each per-language config.
+- Dataset: `ai4bharat/MSMARCO-XI` (Hugging Face), English content only, drawn from the `Eng_Query` / `Eng_Answer` / `passages.English_passages` fields of the `train/hintrain.parquet` file specifically (confirmed real schema — see Context for Implementer). Corpus is capped at the **first 10,000 rows** (~100k passages) of that file's 778,638 total rows. This was revised down from an initial 50,000-row cap once semantic chunking's embedding cost was measured: semantic chunking needs one embed call per *sentence* for boundary detection (not just per chunk), which at 50,000 rows projected to ~3.4 hours combined with indexing both strategies — impractical for fast iteration against the Aug 22 deadline. At 10,000 rows the same pipeline is ~40 minutes.
 - Chunking: exactly 2 distinct chunking strategies, differing in method (not just parameters).
 - Answer output: text only. No text-to-speech.
 - Off-topic, unsafe-input, and groundedness checks: rule-based/local (embedding-similarity thresholds, keyword/pattern matching). No second LLM call for guardrails.
@@ -42,22 +42,25 @@ Type: Feature
 - Vector index: FAISS, in-process, in-memory — one index per chunking strategy.
 - Hosting: a single always-on AWS EC2 instance (not serverless, not auto-scaled).
 - Latency target: the full pipeline (audio in → answer out, including speech-to-text) under 200ms at P50, P70, and P100. Per PRD Engineering Risk 1, this is a stretch target the pipeline may not fully clear — the benchmark report (Task 9) must state the actual measured numbers regardless of outcome.
+- Python tooling: `uv` for all Python operations (`uv run pytest`, `uv sync`, `uv run python -m ...`), not bare `pip`/`python3` — project standard, added mid-implementation. Dependencies live in `pyproject.toml`; `requirements.txt` is kept only as a plain reference list. Lint/format via `ruff check` / `ruff format`; type-check via `basedpyright` (errors must be zero; the large `reportUnknown*`/`reportAny` warning count from third-party stub gaps in pyarrow/huggingface_hub/faiss is accepted as-is, not chased to zero).
 
 ## Context for Implementer
 
-`ai4bharat/MSMARCO-XI` is loaded per-language, e.g. `load_dataset("ai4bharat/MSMARCO-XI", "hi", split="train")` — there is no `"en"` config. Each row, regardless of which language config it comes from, carries the original English content in `Eng_Query`, `Eng_Answer`, and `passages.English_passages`, alongside that config's translated fields (which this project ignores). It is not yet confirmed whether every per-language config covers the same underlying set of English source rows or different subsets — Task 2 must check this against the actual loaded data (e.g. compare `query_id` coverage across two configs) before committing to one config as the corpus source, rather than assuming.
+**Corrected during implementation** (the PRD's and this plan's original wording, based on the HF dataset card's example code, was wrong — `load_dataset("ai4bharat/MSMARCO-XI", "hi", split="train")` does not work; `datasets` only exposes one `"default"` builder config that concatenates every language's training file together, too large to fit this machine's disk). The dataset's real structure, confirmed via `huggingface_hub.HfApi.list_repo_files` and `pyarrow.parquet.ParquetFile` schema inspection: each language has its own parquet file directly (`train/hintrain.parquet`, `train/bentrain.parquet`, etc., each ~3.7-4GB, 778,638 rows for Hindi), downloadable individually via `huggingface_hub.hf_hub_download(repo_id="ai4bharat/MSMARCO-XI", repo_type="dataset", filename="train/hintrain.parquet")`. There is no cross-language comparison needed — the project uses exactly one file (`train/hintrain.parquet`) directly, not a merge across languages.
+
+Confirmed real schema of that file: `Eng_Query` (string), `Eng_Answer` (string), and `passages` (struct with `English_passages: list<string>`, `Translated_passages: list<string>`, `is_selected: list<int64>` — `is_selected` is a list of 0/1 flags parallel-indexed to `English_passages`, not a per-passage nested field). Measured: ~10 passages per row on average.
 
 ## Runtime Environment
 
-- **Start command:** `uvicorn app.main:app --host 0.0.0.0 --port 8000`
+- **Start command:** `uv run uvicorn app.main:app --host 0.0.0.0 --port 8000`
 - **Port:** 8000
 - **Health check:** `GET /health` — returns 200 once the vector indices and embedding/generation clients are loaded and ready
 - **Restart procedure:** re-run the start command (or restart the systemd unit created in Task 10); the service is stateless aside from the on-disk FAISS indices it loads at startup
 
 ## Assumptions
 
-- Every per-language MSMARCO-XI config exposes the same English source rows (same `query_id` space) — Task 2 depends on this and must verify it before ingestion proceeds; if false, Task 2 picks the config with the fullest English coverage instead.
 - The judges/demo audience generates load in the range of a handful of concurrent requests, not a real production traffic pattern — Task 10's EC2 sizing depends on this.
+- The first 10,000 rows of `train/hintrain.parquet` are a representative-enough sample for a demo corpus and for a meaningful recall@k measurement (Task 4) — not a random sample, since the file has no query_id ordering guarantee documented, but adequate for MVP purposes.
 
 ## Risks and Mitigations
 
@@ -66,7 +69,7 @@ Type: Feature
 | The full-pipeline <200ms target at all three percentiles is very unlikely to be met even with every latency-favoring choice made in this plan | High | Submission may have to report a missed target | Task 9's benchmark report states the actual P50/P70/P100 numbers transparently regardless of outcome, per PRD Engineering Risk 1 and Acceptance Criteria 4 |
 | EC2 cold start / first-query model and index warm-up skews the P100 figure | Medium | P100 measurement misleading, target judged unfairly | Task 9's benchmark script runs and discards a stated number of warm-up queries before the measured batch, and states this explicitly in the report |
 | A rule-based groundedness check may pass a subtly ungrounded answer or reject a well-grounded one | Medium | Guardrail under- or over-triggers | Task 7 sets and documents a similarity threshold; Task 7's Definition of Done requires demonstrating both a pass case and a refusal case |
-| Per-language MSMARCO-XI configs may not share the same English row set | Low-Medium | Wrong or incomplete corpus ingested | Task 2 verifies row consistency across configs before committing to one, per its Key Decisions |
+| A 10,000-row subsample may under-represent the full corpus's topic diversity | Low-Medium | Off-topic guardrail or recall@k evaluation less representative than a full-corpus run | Documented explicitly in the benchmark/evaluation output (Task 4, Task 9) as a known scope reduction, not silently presented as full-corpus results |
 
 ## E2E Test Scenarios
 
@@ -123,20 +126,20 @@ Type: Feature
 
 ## Progress Tracking
 
-- [ ] Task 1: Project scaffolding and harness core
-- [ ] Task 2: Dataset ingestion and chunking strategy A (fixed-size)
-- [ ] Task 3: Chunking strategy B and vector indexing for both strategies
-- [ ] Task 4: Retrieval and retrieval-quality evaluation
-- [ ] Task 5: Speech-to-text integration (ElevenLabs streaming)
-- [ ] Task 6: Answer generation (Anthropic Claude)
-- [ ] Task 7: Guardrails (off-topic, unsafe-input, groundedness)
+- [x] Task 1: Project scaffolding and harness core
+- [x] Task 2: Dataset ingestion and chunking strategy A (fixed-size)
+- [x] Task 3: Chunking strategy B and vector indexing for both strategies
+- [x] Task 4: Retrieval and retrieval-quality evaluation
+- [x] Task 5: Speech-to-text integration (ElevenLabs streaming)
+- [x] Task 6: Answer generation (Anthropic Claude)
+- [x] Task 7: Guardrails (off-topic, unsafe-input, groundedness)
 - [ ] Task 8: API wiring and minimal frontend
 - [ ] Task 9: Latency benchmark harness
 - [ ] Task 10: AWS EC2 deployment
 
 ## File Structure
 
-- `requirements.txt` (create) — pinned Python dependencies
+- `pyproject.toml` (create) — dependencies and `uv`/ruff/pytest config (authoritative; `requirements.txt` kept as a plain reference list)
 - `app/main.py` (create) — FastAPI app, routes, health check, static file serving
 - `app/harness.py` (create) — typed call wrapper: retry-once + structured error path, used by every external call
 - `app/schemas.py` (create) — Pydantic input/output models for every pipeline stage
@@ -151,7 +154,8 @@ Type: Feature
 - `scripts/chunk_semantic.py` (create) — chunking strategy B
 - `scripts/build_index.py` (create) — runs embeddings + FAISS index build for both strategies
 - `scripts/evaluate_retrieval.py` (create) — recall@k against `is_selected` labels
-- `scripts/benchmark_latency.py` (create) — runs the test batch, computes P50/P70/P100, writes the report
+- `scripts/generate_test_audio.py` (create) — synthesizes real speech (via ElevenLabs TTS) for the latency benchmark's test batch
+- `scripts/benchmark_latency.py` (create) — runs the test batch against the live `/api/ask` endpoint, computes P50/P70/P100, writes the report
 - `static/index.html` (create) — minimal page: record control, transcript, answer, latency display
 - `static/app.js` (create) — microphone capture, streams audio to the backend, renders the response
 - `deploy/setup.sh` (create) — EC2 provisioning/systemd unit setup
@@ -166,7 +170,7 @@ Type: Feature
 
 **Files:**
 
-- Create: `requirements.txt`
+- Create: `pyproject.toml`
 - Create: `app/main.py`
 - Create: `app/harness.py`
 - Create: `app/schemas.py`
@@ -186,7 +190,7 @@ Type: Feature
 
 ### Task 2: Dataset ingestion and chunking strategy A (fixed-size)
 
-**Objective:** Load the MSMARCO-XI dataset, resolve which per-language config's English fields to use as the corpus, and implement the first chunking strategy — fixed-size splitting with overlap — over that corpus.
+**Objective:** Download `train/hintrain.parquet` directly, extract the first 10,000 rows' English-only fields as the corpus, and implement the first chunking strategy — fixed-size splitting with overlap — over that corpus.
 
 **Files:**
 
@@ -197,13 +201,15 @@ Type: Feature
 
 **Key Decisions / Notes:**
 
-- Per Context for Implementer above: before committing to one language config, `scripts/ingest_dataset.py` must load at least two configs (e.g. `"hi"` and `"bn"`) and compare `query_id` coverage. If they match, pick either; if they diverge, pick the config with the fullest English coverage and note the finding in a code comment.
-- Corpus output: `Eng_Query`, `Eng_Answer`, and each row's `English_passages` (deduplicated across rows), written to a single on-disk file (e.g. JSONL) that Task 3's indexing step reads.
-- Fixed-size chunking: split each passage into token- or character-bounded windows with a stated overlap (e.g. 20%); record the source passage and `is_selected` flag as metadata on every chunk, since Task 4's evaluation needs it.
+- Download via `huggingface_hub.hf_hub_download(repo_id="ai4bharat/MSMARCO-XI", repo_type="dataset", filename="train/hintrain.parquet")`, then read only the first 10,000 rows via `pyarrow.parquet.ParquetFile.iter_batches` (do not load the full 778,638-row file into memory) — per the Global Constraints row cap.
+- Per row, extract `Eng_Query`, `Eng_Answer`, `passages.English_passages` (list of strings) and `passages.is_selected` (parallel list of 0/1 flags, same index order as `English_passages` — confirmed real schema, see Context for Implementer). Deduplicate identical passage text across rows before chunking.
+- Corpus output: the extracted English-only rows written to a single on-disk file (e.g. JSONL) that Task 3's indexing step reads.
+- Fixed-size chunking: split each passage into token- or character-bounded windows with a stated overlap (e.g. 20%); record the source passage and its `is_selected` flag as metadata on every chunk, since Task 4's evaluation needs it.
+- **Revised during implementation, per a review against the `chunking-strategy` skill:** `DEFAULT_CHUNK_SIZE` is 700 characters, not an earlier 200-character value. Fixed-size chunking should bound maximum chunk size, not fragment already-coherent units — MS MARCO passages average ~333 chars and max out at ~1233 chars (measured), so 700 chars lets most passages stay intact as one chunk while still capping the longer outliers. The skill's own guidance (256-1024 *tokens*, i.e. roughly 1000+ characters) confirmed 200 characters was well below even its smallest recommended tier.
 
 **Definition of Done:**
 
-- [ ] Running `scripts/ingest_dataset.py` produces a corpus file containing only English content, with a logged decision on which language config was used and why
+- [ ] Running `scripts/ingest_dataset.py` produces a corpus file containing only the first 10,000 rows' English content
 - [ ] Running `scripts/chunk_fixed_size.py` against that corpus produces chunks that each carry their source passage's `is_selected` metadata
 - [ ] Verify: `pytest tests/test_ingest_dataset.py tests/test_chunk_fixed_size.py -q`
 
@@ -223,8 +229,11 @@ Type: Feature
 **Key Decisions / Notes:**
 
 - `app/embeddings.py` loads one local embedding model at import time (module-level singleton) so later per-query calls (Task 4) don't reload it — this is a hot path per `development-practices.md`'s performance rule.
-- `app/indexing.py` builds one FAISS index per chunking strategy and persists both to disk (e.g. `data/index_fixed.faiss`, `data/index_semantic.faiss`), alongside a parallel metadata store (chunk text, source passage, `is_selected`) keyed by FAISS row id.
-- Semantic chunking (Task 3) differs from fixed-size (Task 2) in method, not parameters — e.g. splitting on embedding-similarity breakpoints between sentences, or splitting on passage/metadata boundaries rather than a fixed window.
+- `app/indexing.py` builds one FAISS index per chunking strategy and persists both to disk (e.g. `data/index_fixed_size.faiss`, `data/index_semantic.faiss`), alongside a parallel metadata store (chunk text, source passage, `is_selected`) keyed by FAISS row id.
+- Semantic chunking (Task 3) differs from fixed-size (Task 2) in method, not parameters — implemented as embedding-similarity breakpoints between sentences (see `scripts/chunk_semantic.py`).
+- **Added during implementation:** both indices persist as int8 scalar-quantized (`faiss.IndexScalarQuantizer`, `QT_8bit`) rather than raw float32 `IndexFlatIP` — ~4x smaller in memory, measured at 99.6% top-5 retrieval agreement with the uncompressed index, needed to fit both strategies' indices resident on the `t3.small` EC2 instance chosen for Task 10 (see `deploy/AWS_SETUP.md`).
+- **Revised during implementation, per the `chunking-strategy` skill:** `DEFAULT_SIMILARITY_THRESHOLD` in `scripts/chunk_semantic.py` is 0.8, not an earlier 0.5. General sentence-embedding similarity between unrelated sentences commonly sits in the 0.3-0.6 range (embedding-space anisotropy), so 0.5 under-split — merging sentences that weren't actually thematically connected. The skill recommends 0.8 for embedding-based semantic boundary detection. **Deferred, not applied:** the skill also recommends comparing sentences via a 3-5 sentence buffer window rather than adjacent pairs only, and an iterate-until-target validation loop (cohesion score, retrieval precision/recall) — both skipped given the Aug 22 deadline; the PRD only requires multiple *distinct* chunking strategies, not a specific quality bar.
+- **Performance fix during implementation:** both `app/indexing.py`'s `build_index` and `scripts/chunk_semantic.py`'s sentence-boundary detection call `app/embeddings.py`'s new `embed_batch()` (one call for a whole list of texts) instead of `embed()` in a per-item loop. The per-item version made a real `build_index` run take far longer than the batched-throughput estimate (~354 texts/sec) projected, since per-call model overhead dominates when texts aren't batched — discovered mid-run on the 10,000-row corpus (~486k total chunks).
 
 **Definition of Done:**
 
@@ -246,7 +255,8 @@ Type: Feature
 
 - `app/retrieval.py` exposes `retrieve(query: str, strategy: str, k: int) -> RetrievalOutput`, where `RetrievalOutput` (defined in Task 1's `app/schemas.py`) wraps a list of retrieved-passage items. Task 6 consumes this same `RetrievalOutput` — do not introduce a second name for it.
 - `scripts/evaluate_retrieval.py` computes recall@k (does the top-k retrieved set include a passage flagged `is_selected=1` for that query) for at least one strategy, over a sample of ingested queries — this is PRD Acceptance Criteria 3.
-- Retrieval latency (embed + FAISS search) is logged per call here — Task 9 reuses this instrumentation rather than re-adding it.
+- **Added during implementation:** `app/retrieval.py` caches each strategy's loaded index+metadata per-process via `functools.cache` on a private `_load_cached` helper (public `INDEX_PATHS` dict), rather than reloading from disk on every call — reloading (and re-unpickling metadata) on every request cost both latency budget and memory churn.
+- **Real measured recall@5** (10,000-row corpus, 30-query sample, `scripts/evaluate_retrieval.py`): fixed_size = 0.790, semantic = 0.661. Fixed-size's larger 700-char chunks apparently preserve more complete passage context per chunk, which helps recall against the passage-level `is_selected` ground truth here — semantic chunking's smaller sub-passage chunks (338,544 vs 101,131 total, ~3.3x more) each carry less complete context. This is a genuine empirical result for the submission's "vast chunking" comparison, not a bug.
 
 **Definition of Done:**
 
@@ -337,7 +347,7 @@ Type: Feature
 
 - Request flow in the new endpoint: STT (Task 5) → unsafe-input check (Task 7) → retrieval (Task 4) → off-topic check (Task 7) → generation (Task 6) → groundedness check (Task 7) → response. Any `ok=False` `StageResult` along the way short-circuits to a user-facing error/refusal, never a 500 with a stack trace.
 - `GET /health` now checks that both FAISS indices are loaded and the embedding model is initialized; returns 200 only when ready.
-- `static/app.js` uses the browser `MediaRecorder`/`getUserMedia` APIs to capture microphone audio and stream it to the backend; `static/index.html` shows the record control, transcript, answer text, and per-query latency.
+- `static/app.js` uses the Web Audio API (`getUserMedia` + `AudioContext`/`ScriptProcessorNode`) to capture raw 16kHz PCM and stream it to the backend, not `MediaRecorder` — `MediaRecorder` produces compressed WebM/Opus, which does not match what Task 5's STT client expects (`AudioFormat.PCM_16000`). `static/index.html` shows the record control, transcript, answer text, and per-query latency.
 - Empty/unintelligible transcript (Task 5) is handled here as a distinct "could not understand" response, satisfying TS-004 — this is the first task that decides that behavior, per Task 5's note.
 
 **Definition of Done:**
@@ -349,25 +359,29 @@ Type: Feature
 
 ### Task 9: Latency benchmark harness
 
-**Objective:** Build a script that runs a stated batch of test queries through the full deployed pipeline, records per-stage and total latency for each, discards a stated warm-up window, and computes and reports P50, P70, and P100 latency plus whether the under-200ms target was met at each.
+**Objective:** Build a script that runs a stated batch of test queries through the full deployed pipeline, records end-to-end latency for each, discards a stated warm-up window, and computes and reports P50, P70, and P100 latency plus whether the under-200ms target was met at each.
 
 **Files:**
 
 - Create: `scripts/benchmark_latency.py`
+- Create: `scripts/generate_test_audio.py`
 - Test: `tests/test_benchmark.py`
+- Test: `tests/test_generate_test_audio.py`
 
 **Key Decisions / Notes:**
 
-- Batch size: at least 30 test queries (PRD Acceptance Criteria 5's "a reasonable number").
-- Warm-up handling: the first N queries (stated explicitly in the report, e.g. 3) run and are discarded before the measured batch begins, mitigating the cold-start risk (PRD Engineering Risk 3 / this plan's Risks table).
-- Per-query timing captures each stage (STT, retrieval, generation, guardrails) plus the end-to-end total, so the report can show where time actually goes, not just the final number.
+- Batch size: at least 30 test queries (PRD Acceptance Criteria 5's "a reasonable number") — `DEFAULT_BATCH_SIZE = 30`.
+- Warm-up handling: the first N queries (`DEFAULT_WARMUP_QUERIES = 3`) run and are discarded before the measured batch begins, mitigating the cold-start risk (PRD Engineering Risk 3 / this plan's Risks table).
+- **Added during implementation — how "full pipeline including speech-to-text" gets measured without real human recordings:** `scripts/generate_test_audio.py` synthesizes a small fixed set of representative questions into real 16kHz PCM audio via ElevenLabs' own TTS API (`output_format="pcm_16000"`, matching what Task 5's STT client expects), caching the clips to `data/benchmark_audio/`. `scripts/benchmark_latency.py`'s `run_benchmark` cycles through this small clip set to reach the requested batch size and sends each through the real, live `/api/ask` endpoint via `run_batch` — real STT, retrieval, generation, and guardrails on every call, timed end to end. A latency benchmark does not need query diversity (unlike retrieval-quality evaluation), only enough real round trips for a stable percentile, so cycling a handful of clips is sufficient.
+- **Scope reduction from the original per-stage-timing ambition:** this measures end-to-end latency only, not a per-stage (STT/retrieval/generation/guardrails) breakdown — that would need timing instrumentation added inside `app/main.py`'s endpoint itself, cut for time. PRD Acceptance Criteria 4/5 only require the end-to-end P50/P70/P100 numbers, which this satisfies.
+- `run_benchmark(audio_paths, base_url=...)`: `base_url=None` benchmarks the app in-process (local dev, via `TestClient`); a real URL benchmarks the deployed instance over the network (Task 10) — the submission's numbers must come from the latter, per PRD Open Decision 4.
 - Report output states, for each of P50/P70/P100: the measured value and whether it is under 200ms — matching PRD Acceptance Criteria 4's requirement to state this plainly regardless of outcome.
 
 **Definition of Done:**
 
-- [ ] Running the script against a locally running instance with a mocked STT/generation backend produces a report with P50, P70, and P100 values and a pass/fail statement against 200ms for each
+- [ ] Running the script against a locally running instance produces a report with P50, P70, and P100 values and a pass/fail statement against 200ms for each
 - [ ] The report explicitly states the warm-up queries were excluded from the measured percentiles
-- [ ] Verify: `pytest tests/test_benchmark.py -q`
+- [ ] Verify: `pytest tests/test_benchmark.py tests/test_generate_test_audio.py -q`
 
 ### Task 10: AWS EC2 deployment
 
