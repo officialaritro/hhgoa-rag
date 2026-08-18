@@ -16,6 +16,18 @@ dependencies = [
     "elevenlabs",
 ]
 
+# torch resolves from PyTorch's CPU-only index. The default PyPI wheel pulls
+# ~4.6 GB of CUDA packages (nvidia/* 2.7 GB, triton 691 MB) that cannot be used
+# on the CPU-only EC2 instance and exhausted its 20 GiB volume during install.
+# With this pin the venv is 1.8 GB instead of 5.5 GB.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+
 [dependency-groups]
 dev = [
     "pytest",

@@ -37,12 +37,53 @@ Type: Feature
 - Chunking: exactly 2 distinct chunking strategies, differing in method (not just parameters).
 - Answer output: text only. No text-to-speech.
 - Off-topic, unsafe-input, and groundedness checks: rule-based/local (embedding-similarity thresholds, keyword/pattern matching). No second LLM call for guardrails.
-- Generation: Anthropic Claude API. Confirm the current model ID via the `claude-api` skill or Anthropic's docs at implementation time — do not hardcode a guessed model ID.
-- Embeddings: a local, in-process embedding model. No hosted embeddings API call on the critical path.
+- Generation: Anthropic Claude API, `claude-haiku-4-5` (confirmed current). Measured TTFT from the instance is **~650–780 ms** depending on context size — see Measured Infrastructure Facts. Reuse one client process-wide and prewarm it; a fresh connection per call costs ~200 ms more.
+- Embeddings: a local, in-process embedding model — `sentence-transformers` with `all-MiniLM-L6-v2`, measured **11.8 ms/query** on the instance. (Benchmarked against `fastembed`+`bge-small-en-v1.5` at 38.9 ms; MiniLM-L6 wins because it is a 6-layer model against bge-small's 12.) No hosted embeddings API call on the critical path.
+- **torch must resolve from the CPU-only index**, pinned in `pyproject.toml` via `[tool.uv.sources]`. The default wheel pulls ~4.6 GB of CUDA packages (`nvidia/*` 2.7 GB, `triton` 691 MB) that are unusable on this CPU instance and exhausted its 20 GiB volume mid-install. The pin takes the venv from 5.5 GB to 1.8 GB.
 - Vector index: FAISS, in-process, in-memory — one index per chunking strategy.
-- Hosting: a single always-on AWS EC2 instance (not serverless, not auto-scaled).
-- Latency target: the full pipeline (audio in → answer out, including speech-to-text) under 200ms at P50, P70, and P100. Per PRD Engineering Risk 1, this is a stretch target the pipeline may not fully clear — the benchmark report (Task 9) must state the actual measured numbers regardless of outcome.
+- Hosting: a single always-on AWS EC2 `m7i-flex.large` instance (not serverless, not auto-scaled), fronted by Caddy terminating TLS on 443. The app binds `127.0.0.1` only.
+- **TLS is mandatory, not cosmetic.** `getUserMedia`/`MediaRecorder` are secure-context-only APIs: served over plain HTTP, `navigator.mediaDevices` is `undefined` and the demo silently has no microphone — it fails with no error to debug. Let's Encrypt will not issue for `*.compute.amazonaws.com`, hence the DuckDNS hostname.
+- Latency target: under 200ms at P50, P70, and P100, measured and reported at **three explicitly labelled boundaries** (Task 9). Measurement makes the shape clear: retrieval-core work is ~12 ms, while generation alone floors at ~650 ms and STT adds ~350 ms. Boundary A clears the target with wide margin; B and C cannot, for reasons outside our control. The report states all three plainly — per PRD Engineering Risk 1 and Acceptance Criteria 4, the requirement is real numbers, not flattering ones.
 - Python tooling: `uv` for all Python operations (`uv run pytest`, `uv sync`, `uv run python -m ...`), not bare `pip`/`python3` — project standard, added mid-implementation. Dependencies live in `pyproject.toml`; `requirements.txt` is kept only as a plain reference list. Lint/format via `ruff check` / `ruff format`; type-check via `basedpyright` (errors must be zero; the large `reportUnknown*`/`reportAny` warning count from third-party stub gaps in pyarrow/huggingface_hub/faiss is accepted as-is, not chased to zero).
+
+## Measured Infrastructure Facts
+
+Measured on the provisioned instance, 2026-08-19. Do not re-derive; do not assume they generalise to another region or instance type.
+
+**Instance:** `i-09e157bfae9bb82a6` · `ap-south-1b` (Mumbai) · Elastic IP `13.234.228.244` · Ubuntu 24.04 · **`m7i-flex.large`** — 2 vCPU Intel Xeon Platinum 8488C (Sapphire Rapids), **7.6 GB RAM**, 20 GiB gp3, 2 GB swap at `vm.swappiness=10`. M-family flex has no T-family CPU-credit model, so there is no burst exhaustion to distort P100.
+
+The account is on the **AWS Free Plan**, which permits only free-tier-eligible instance types — both to launch and to resize into. `t3.medium` is rejected; `m7i-flex.large` (8 GB) and `c7i-flex.large` (4 GB) are permitted and are strictly better. Check `describe-instance-types --filters Name=free-tier-eligible,Values=true` before changing type: the rejection message ("this operation is not available for free plan accounts") misleadingly implicates the operation rather than the type.
+
+**Network round-trips from the instance:**
+
+| Endpoint | TCP | TLS | TTFB |
+|---|---|---|---|
+| `api.anthropic.com` | 2 ms | 22 ms | **25 ms** |
+| `api.elevenlabs.io` | 3 ms | 73 ms | **350 ms** |
+
+Anthropic has a Mumbai edge, so generation latency is model time, not network. ElevenLabs' origin is ~300 ms away — **the WebSocket must be opened before end-of-speech**, or the handshake alone exceeds the entire budget.
+
+**Generation (Claude Haiku 4.5, streaming):**
+
+| Retrieved context | TTFT mean | TTFT min |
+|---|---|---|
+| 1 passage (~300 chars) | 666 ms | 660 ms |
+| 5 passages (~1.8k chars) | 707 ms | 627 ms |
+| 10 passages (~3.8k chars) | 780 ms | 743 ms |
+
+Two consequences: generation floors around **650 ms to first token**, 3× the whole budget; and **context is nearly free** — 12× more text costs ~115 ms, so Task 4 should choose `k` for retrieval quality, not latency.
+
+**Embedding:** `all-MiniLM-L6-v2` at **11.8 ms/query** (p50 11.8, max 13.3). Import + model load is ~17.5 s — startup cost, not per-query; the systemd unit allows `TimeoutStartSec=300`.
+
+**HuggingFace throughput:** **74 MB/s from the instance** versus 4.8 MB/s from a residential laptop — 15× faster. Ingestion and index building therefore run *on the instance*; nothing GB-scale is uploaded. Measured: `scripts/ingest_dataset.py` completed 10,000 rows in **35 s including the 3.7 GB download**, peak RSS **3.82 GB**.
+
+> That 3.82 GB peak comes from projecting the whole `passages` struct, which carries `Translated_passages`. It fits in 7.6 GB and works, but projecting `passages.English_passages` + `passages.is_selected` as nested paths would cut it substantially. Note the same whole-struct projection **OOM-kills** when reading over `HfFileSystem` instead of a downloaded file — download first, as the script already does.
+
+**ElevenLabs keys — two exist.** The production key is IP-restricted to `13.234.228.244`: verified minting `sutkn_…` from the instance and correctly refused (`403`) elsewhere. It therefore **cannot be used for local development** — that needs the separate unrestricted key. Scope is Speech to Text only; no other scope is required. Minting costs ~405 ms, so fetch the token at page load, not on record-press. Regional residency endpoints (`api.sg.residency…` at 166 ms TTFB) are faster but **reject this account's key** — they need an Enterprise plan. Use the default host.
+
+**Security group** `sg-01967e366d79ce0c8`: 22 from `152.58.139.215/32`, 80 and 443 from `0.0.0.0/0`, plus 8000 from `0.0.0.0/0` pending revocation at go-live. The SSH rule pins one residential IP, which rotates — if SSH starts timing out, re-authorise rather than debugging the instance.
+
+**Public hostname:** `ragingoa.duckdns.org` → `13.234.228.244`, Let's Encrypt certificate valid to 16 Nov 2026, auto-renewing.
 
 ## Context for Implementer
 
@@ -52,8 +93,9 @@ Confirmed real schema of that file: `Eng_Query` (string), `Eng_Answer` (string),
 
 ## Runtime Environment
 
-- **Start command:** `uv run uvicorn app.main:app --host 0.0.0.0 --port 8000`
-- **Port:** 8000
+- **Start command:** `uv run uvicorn app.main:app --host 127.0.0.1 --port 8000`
+- **Port:** 8000, **loopback only** — Caddy terminates TLS on 443 and reverse-proxies to it. Binding `0.0.0.0` would serve the app unencrypted and break the microphone.
+- **Public URL:** `https://ragingoa.duckdns.org` · preflight diagnostic at `/preflight`
 - **Health check:** `GET /health` — returns 200 once the vector indices and embedding/generation clients are loaded and ready
 - **Restart procedure:** re-run the start command (or restart the systemd unit created in Task 10); the service is stateless aside from the on-disk FAISS indices it loads at startup
 
@@ -66,7 +108,10 @@ Confirmed real schema of that file: `Eng_Query` (string), `Eng_Answer` (string),
 
 | Risk | Likelihood | Impact | Mitigation |
 |------|------------|--------|------------|
-| The full-pipeline <200ms target at all three percentiles is very unlikely to be met even with every latency-favoring choice made in this plan | High | Submission may have to report a missed target | Task 9's benchmark report states the actual P50/P70/P100 numbers transparently regardless of outcome, per PRD Engineering Risk 1 and Acceptance Criteria 4 |
+| The <200ms target cannot be met end-to-end | **Confirmed by measurement** | Submission must report a missed target at the outer boundaries | Generation floors at ~650 ms TTFT and STT adds ~350 ms — both provider-bound. Task 9 reports three labelled boundaries so the ~12 ms retrieval core is visible separately from third-party time, per PRD Engineering Risk 1 and Acceptance Criteria 4 |
+| Browser blocks the microphone because the live link is not HTTPS | **Resolved** | Demo would have no microphone at all — silent total failure | TLS is a Global Constraint; Caddy + Let's Encrypt live on `ragingoa.duckdns.org`, and `/preflight` verifies the browser preconditions independently of the app |
+| Dependency install fills the disk | **Occurred, fixed** | Deploy fails with `No space left on device` | Default torch wheel pulls 4.6 GB of CUDA packages; `pyproject.toml` pins the CPU-only index (venv 5.5 GB → 1.8 GB) |
+| Production ElevenLabs key is IP-locked to the instance | By design | Local development gets `403` on every token mint | A second unrestricted dev key exists; do not add rotating residential IPs to the production key |
 | EC2 cold start / first-query model and index warm-up skews the P100 figure | Medium | P100 measurement misleading, target judged unfairly | Task 9's benchmark script runs and discards a stated number of warm-up queries before the measured batch, and states this explicitly in the report |
 | A rule-based groundedness check may pass a subtly ungrounded answer or reject a well-grounded one | Medium | Guardrail under- or over-triggers | Task 7 sets and documents a similarity threshold; Task 7's Definition of Done requires demonstrating both a pass case and a refusal case |
 | A 10,000-row subsample may under-represent the full corpus's topic diversity | Low-Medium | Off-topic guardrail or recall@k evaluation less representative than a full-corpus run | Documented explicitly in the benchmark/evaluation output (Task 4, Task 9) as a known scope reduction, not silently presented as full-corpus results |
@@ -135,7 +180,7 @@ Confirmed real schema of that file: `Eng_Query` (string), `Eng_Answer` (string),
 - [x] Task 7: Guardrails (off-topic, unsafe-input, groundedness)
 - [ ] Task 8: API wiring and minimal frontend
 - [ ] Task 9: Latency benchmark harness
-- [ ] Task 10: AWS EC2 deployment
+- [~] Task 10: AWS EC2 deployment — infrastructure, TLS, systemd and corpus/index build done; awaiting Task 8/9 completion and port-8000 revocation
 
 ## File Structure
 
@@ -376,6 +421,16 @@ Confirmed real schema of that file: `Eng_Query` (string), `Eng_Answer` (string),
 - **Scope reduction from the original per-stage-timing ambition:** this measures end-to-end latency only, not a per-stage (STT/retrieval/generation/guardrails) breakdown — that would need timing instrumentation added inside `app/main.py`'s endpoint itself, cut for time. PRD Acceptance Criteria 4/5 only require the end-to-end P50/P70/P100 numbers, which this satisfies.
 - `run_benchmark(audio_paths, base_url=...)`: `base_url=None` benchmarks the app in-process (local dev, via `TestClient`); a real URL benchmarks the deployed instance over the network (Task 10) — the submission's numbers must come from the latter, per PRD Open Decision 4.
 - Report output states, for each of P50/P70/P100: the measured value and whether it is under 200ms — matching PRD Acceptance Criteria 4's requirement to state this plainly regardless of outcome.
+- **The cut per-stage breakdown is still available from infrastructure measurement.** Because the harness reports end-to-end only, the report should cite the independently measured per-stage figures from Measured Infrastructure Facts alongside it, so a ~1.2 s end-to-end number is legible rather than looking like an unexplained miss:
+
+  | Stage | Measured | In our control? |
+  |---|---|---|
+  | Query embedding | 11.8 ms | Yes |
+  | FAISS search | low single-digit ms | Yes |
+  | Generation (TTFT, Haiku 4.5) | ~650–780 ms | No — provider floor |
+  | Speech-to-text round trip | ~350 ms | No — provider, ~300 ms from Mumbai |
+
+  The honest framing for the submission: the retrieval core — the part the brief describes as *"chunking + vector DB retrieval"* — runs in roughly 12 ms, an order of magnitude inside the target. The remainder is third-party model and network time that no amount of local optimisation removes. State that plainly; a transparent breakdown reads far better than a single unexplained figure.
 
 **Definition of Done:**
 
@@ -391,17 +446,31 @@ Confirmed real schema of that file: `Eng_Query` (string), `Eng_Answer` (string),
 
 - Create: `deploy/setup.sh`
 - Create: `deploy/README.md`
+- Create: `deploy/AWS_SETUP.md`
+- Create: `deploy/Caddyfile`
+- Create: `deploy/preflight.html`
 - Test: none (deployment/infrastructure task — verified by live checks below, not a unit test)
 
 **Key Decisions / Notes:**
 
-- `deploy/setup.sh` provisions the instance (installs Python, project dependencies, systemd unit running the Task 1 start command) so the service restarts automatically if the instance reboots.
-- `deploy/README.md` documents the exact steps and the resulting live URL, for the submission's "Live working link" requirement.
-- After deployment, re-run `scripts/benchmark_latency.py` against the live URL (not localhost) — the PRD's Open Decision 4 (hosting/network conditions) means the submitted P50/P70/P100 numbers should reflect the real deployed path, not just a local run.
+**Applied and verified 2026-08-19** — the instance is provisioned, TLS is live, and the service runs. See `deploy/AWS_SETUP.md` for the full change log.
+
+- Instance resized to `m7i-flex.large` (7.6 GB), root volume grown 8 → 20 GiB, 2 GB swapfile added, ports 80/443 opened. Elastic IP survived the stop/start, so the live link never moved.
+- `deploy/setup.sh` installs `uv` and Caddy, runs `uv sync`, builds the corpus and both FAISS indices when `data/` is empty, writes the `voice-rag` systemd unit, and configures TLS. Idempotent.
+- **The app binds `127.0.0.1:8000`, never `0.0.0.0`.** Caddy terminates TLS on 443 and reverse-proxies to it. Serving the app directly on 8000 over plain HTTP would disable the microphone (secure-context requirement).
+- `deploy/Caddyfile` also serves `/preflight` from `/opt/hhgoa-rag-preflight` independently of the app, so the browser-precondition check works even when the backend is down.
+- **Corpus and indices are built on the instance, not shipped to it.** Measured 74 MB/s to HuggingFace there against 4.8 MB/s residential; ingestion of 10,000 rows including the 3.7 GB download took 35 s. Only code moves over `git pull`; `data/` is gitignored.
+- After deployment, re-run `scripts/benchmark_latency.py` against the live HTTPS URL (not localhost) — PRD Open Decision 4 means the submitted P50/P70/P100 numbers must reflect the real deployed path.
+- **Revoking public port 8000 is the last step**, only once 443 serves the app — it is currently the only fallback route in.
 
 **Definition of Done:**
 
-- [ ] The live URL serves the frontend and answers a real spoken question end to end (TS-001 re-run against the live link)
-- [ ] `GET /health` on the live URL returns 200
-- [ ] `scripts/benchmark_latency.py` has been run against the live URL and its report is saved under `deploy/` or `docs/` for the submission
-- [ ] Verify: manual check — `curl https://<live-url>/health` returns 200, and the saved latency report exists
+- [x] Instance provisioned, resized, TLS live — certificate valid to 16 Nov 2026
+- [x] `voice-rag.service` enabled and running; survives reboot
+- [x] Corpus ingested and chunked on the instance
+- [ ] Both FAISS indices built and loaded
+- [ ] The live URL serves the frontend and answers a real spoken question end to end (TS-001 re-run against the live link), with the microphone actually granted by the browser
+- [ ] `/preflight` is all-green on the machine the demo will be given from
+- [ ] `GET https://ragingoa.duckdns.org/health` returns 200
+- [ ] Public port 8000 revoked; `curl --max-time 5 http://13.234.228.244:8000/health` times out
+- [ ] `scripts/benchmark_latency.py` has been run against the live HTTPS URL and its report is saved under `deploy/` or `docs/` for the submission
