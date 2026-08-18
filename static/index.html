@@ -2,11 +2,47 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Voice-Enabled RAG Pipeline</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body {
+      font: 15px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif;
+      max-width: 44rem; margin: 2.5rem auto; padding: 0 1.25rem;
+    }
+    h1 { font-size: 1.35rem; margin-bottom: .25rem; }
+    .sub { opacity: .7; margin-top: 0; }
+    fieldset { border: 1px solid #8884; border-radius: 6px; margin: 1.25rem 0; }
+    legend { padding: 0 .4rem; opacity: .75; font-size: .85rem; }
+    #recordBtn {
+      font: inherit; font-weight: 600; padding: .7rem 1.4rem;
+      border-radius: 6px; cursor: pointer; touch-action: none;
+    }
+    #recordBtn[disabled] { cursor: not-allowed; opacity: .5; }
+    #status { min-height: 1.4em; opacity: .8; }
+    h3 { font-size: .8rem; text-transform: uppercase; letter-spacing: .06em;
+         opacity: .6; margin-bottom: .3rem; }
+    #transcript, #answer { margin-top: 0; }
+    #answer { font-size: 1.05rem; }
+    .refusal { color: #cf222e; font-weight: 600; }
+    table { border-collapse: collapse; font-variant-numeric: tabular-nums; }
+    td { padding: .12rem .9rem .12rem 0; }
+    td.n { text-align: right; }
+    .total td { border-top: 1px solid #8884; font-weight: 600; padding-top: .3rem; }
+    .warn { color: #cf222e; font-weight: 600; }
+  </style>
 </head>
 <body>
   <h1>Voice-Enabled RAG Pipeline</h1>
-  <p>Hold the button, ask a question, release to send.</p>
+  <p class="sub">Hold the button, ask a question, release to send.</p>
+
+  <p id="micWarning" class="warn" hidden></p>
+
+  <fieldset>
+    <legend>Chunking strategy</legend>
+    <div id="strategyChoices">loading…</div>
+  </fieldset>
+
   <button id="recordBtn" type="button">Hold to speak</button>
   <p id="status"></p>
 
@@ -17,7 +53,7 @@
   <p id="answer"></p>
 
   <h3>Latency</h3>
-  <p id="latency"></p>
+  <div id="latency"></div>
 
   <script src="/static/app.js"></script>
 </body>

@@ -14,6 +14,17 @@ let sourceNode;
 let processorNode;
 let mediaStream;
 let capturedChunks = [];
+let recording = false;
+let selectedStrategy = "fixed_size";
+
+const $ = (id) => document.getElementById(id);
+
+// getUserMedia is a secure-context-only API: over plain HTTP
+// navigator.mediaDevices is undefined and recording fails with no visible
+// error. Detect it up front rather than throwing on first click.
+function micAvailable() {
+  return !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+}
 
 function floatTo16BitPCM(float32Array) {
   const buffer = new ArrayBuffer(float32Array.length * 2);
@@ -26,6 +37,8 @@ function floatTo16BitPCM(float32Array) {
 }
 
 async function startRecording() {
+  if (recording || !micAvailable()) return;
+  recording = true;
   capturedChunks = [];
   mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
   audioContext = new AudioContext({ sampleRate: 16000 });
@@ -39,7 +52,7 @@ async function startRecording() {
 
   sourceNode.connect(processorNode);
   processorNode.connect(audioContext.destination);
-  document.getElementById("status").textContent = "Recording...";
+  $("status").textContent = "Recording…";
 }
 
 function concatenateChunks(chunks) {
@@ -53,31 +66,120 @@ function concatenateChunks(chunks) {
   return combined;
 }
 
+// Stage keys are whatever app/main.py reports, so the table follows the
+// pipeline automatically if stages are added or renamed server-side.
+const STAGE_LABELS = {
+  stt: "Speech-to-text",
+  guardrail_unsafe: "Guardrail · unsafe input",
+  retrieval: "Retrieval (embed + FAISS)",
+  guardrail_off_topic: "Guardrail · off-topic",
+  generation: "Generation (Claude)",
+  guardrail_groundedness: "Guardrail · groundedness",
+};
+
+function renderLatency(data) {
+  const stages = data.stages_ms || {};
+  const rows = Object.entries(stages)
+    .map(
+      ([key, ms]) =>
+        `<tr><td>${STAGE_LABELS[key] || key}</td><td class="n">${ms.toFixed(1)} ms</td></tr>`,
+    )
+    .join("");
+  const total =
+    data.latency_ms != null
+      ? `<tr class="total"><td>Total</td><td class="n">${data.latency_ms.toFixed(1)} ms</td></tr>`
+      : "";
+  $("latency").innerHTML = rows || total ? `<table>${rows}${total}</table>` : "";
+}
+
 function displayResult(data) {
-  document.getElementById("transcript").textContent = data.transcript || "";
-  document.getElementById("answer").textContent = data.answer || data.refusal_reason || "";
-  document.getElementById("latency").textContent = data.latency_ms
-    ? `${data.latency_ms.toFixed(1)} ms`
-    : "";
+  $("transcript").textContent = data.transcript || "";
+  const answerEl = $("answer");
+  if (data.answer) {
+    answerEl.textContent = data.answer;
+    answerEl.className = "";
+  } else {
+    // A refusal is a successful outcome, not an error -- show why.
+    answerEl.textContent = data.refusal_reason
+      ? `Cannot answer — ${data.refusal_reason}`
+      : "";
+    answerEl.className = "refusal";
+  }
+  renderLatency(data);
 }
 
 async function stopRecording() {
+  if (!recording) return;
+  recording = false;
   processorNode.disconnect();
   sourceNode.disconnect();
   mediaStream.getTracks().forEach((track) => track.stop());
-  document.getElementById("status").textContent = "Processing...";
+  $("status").textContent = "Processing…";
 
   const audioBytes = concatenateChunks(capturedChunks);
-  const response = await fetch("/api/ask", {
-    method: "POST",
-    headers: { "Content-Type": "application/octet-stream" },
-    body: audioBytes,
-  });
-  const data = await response.json();
-  displayResult(data);
-  document.getElementById("status").textContent = "";
+  try {
+    const response = await fetch(
+      `/api/ask?strategy=${encodeURIComponent(selectedStrategy)}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/octet-stream" },
+        body: audioBytes,
+      },
+    );
+    displayResult(await response.json());
+  } catch (err) {
+    $("answer").textContent = `Request failed: ${err.message}`;
+    $("answer").className = "refusal";
+  }
+  $("status").textContent = "";
 }
 
-const recordButton = document.getElementById("recordBtn");
-recordButton.addEventListener("mousedown", startRecording);
-recordButton.addEventListener("mouseup", stopRecording);
+// Both chunking strategies are indexed; let the user pick which one answers.
+// Hard-coding one would waste the second index entirely.
+async function loadStrategies() {
+  try {
+    const { strategies, default: def } = await (
+      await fetch("/api/strategies")
+    ).json();
+    selectedStrategy = def;
+    $("strategyChoices").innerHTML = strategies
+      .map(
+        (s) =>
+          `<label style="margin-right:1.2rem">
+             <input type="radio" name="strategy" value="${s}" ${s === def ? "checked" : ""}>
+             ${s.replace("_", "-")}
+           </label>`,
+      )
+      .join("");
+    for (const input of document.querySelectorAll('input[name="strategy"]')) {
+      input.addEventListener("change", (e) => {
+        selectedStrategy = e.target.value;
+      });
+    }
+  } catch {
+    $("strategyChoices").textContent = "unavailable (service not ready)";
+  }
+}
+
+const recordButton = $("recordBtn");
+if (!micAvailable()) {
+  recordButton.disabled = true;
+  const warning = $("micWarning");
+  warning.hidden = false;
+  warning.textContent = window.isSecureContext
+    ? "This browser does not expose a microphone API."
+    : "Microphone unavailable: this page must be served over HTTPS.";
+} else {
+  // Pointer events, not mousedown/mouseup: mouseup fires on the element the
+  // cursor is over, so releasing off the button would leave it recording
+  // forever. Pointer capture keeps the release bound to the button, and the
+  // same handlers cover touch on a phone.
+  recordButton.addEventListener("pointerdown", (e) => {
+    recordButton.setPointerCapture(e.pointerId);
+    startRecording();
+  });
+  recordButton.addEventListener("pointerup", stopRecording);
+  recordButton.addEventListener("pointercancel", stopRecording);
+}
+
+loadStrategies();
