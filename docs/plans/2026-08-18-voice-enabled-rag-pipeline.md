@@ -201,6 +201,7 @@ Confirmed real schema of that file: `Eng_Query` (string), `Eng_Answer` (string),
 - `scripts/evaluate_retrieval.py` (create) — recall@k against `is_selected` labels
 - `scripts/generate_test_audio.py` (create) — synthesizes real speech (via ElevenLabs TTS) for the latency benchmark's test batch
 - `scripts/benchmark_latency.py` (create) — runs the test batch against the live `/api/ask` endpoint, computes P50/P70/P100, writes the report
+- `scripts/tune_thresholds.py` (create) — measures the score distributions the guardrail thresholds separate, and recommends values from data
 - `static/index.html` (create) — minimal page: record control, transcript, answer, latency display
 - `static/app.js` (create) — microphone capture, streams audio to the backend, renders the response
 - `deploy/setup.sh` (create) — EC2 provisioning/systemd unit setup
@@ -368,7 +369,9 @@ Confirmed real schema of that file: `Eng_Query` (string), `Eng_Answer` (string),
 - Off-topic check: if the top retrieved passage's similarity score (from Task 4) falls below a stated threshold, treat the query as off-topic — reuses retrieval infrastructure instead of adding a separate model call.
 - Unsafe-input check: a keyword/pattern-based filter over the transcript text, checked before retrieval runs (cheapest check first).
 - Groundedness check: embedding-similarity between the generated answer's embedding (via Task 3's `app/embeddings.py`) and the retrieved context's embedding; below a stated threshold, the answer is treated as ungrounded and replaced with a refusal.
-- Every threshold used here is a literal constant defined in this file with a one-line comment explaining its origin (chosen empirically during this task, not derived from a formula) — Task 9's benchmark run is the first real signal on whether thresholds need retuning.
+- Every threshold used here is a literal constant defined in this file with a one-line comment explaining its origin — Task 9's benchmark run is a further signal on whether they need retuning.
+- **`scripts/tune_thresholds.py` replaces guessing with measurement.** It samples in-corpus queries against clearly off-topic ones, reports both top-score distributions, and places the off-topic threshold between the off-topic p95 and the in-corpus p05 — the two values that actually govern false accepts and false rejects. Groundedness needs no LLM call: an `Eng_Answer` paired with its own query's retrieved context is grounded by construction, and the same answer against a different query's context is not. Run it once the indices exist, then set the constants from its output.
+- The untuned failure mode that matters is **refusing a valid question live on stage**, which is worse than answering a marginal one — if the distributions overlap, bias the off-topic threshold low.
 
 **Definition of Done:**
 
