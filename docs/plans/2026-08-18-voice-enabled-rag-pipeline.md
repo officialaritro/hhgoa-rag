@@ -73,6 +73,8 @@ Anthropic has a Mumbai edge, so generation latency is model time, not network. E
 
 Two consequences: generation floors around **650 ms to first token**, 3× the whole budget; and **context is nearly free** — 12× more text costs ~115 ms, so Task 4 should choose `k` for retrieval quality, not latency.
 
+**Speech-to-text (measured end to end, real audio through `app/stt.py`):** **~1.1–1.3 s per query**, not the ~350 ms suggested by raw API TTFB. The difference is the WebSocket handshake, audio upload, and the commit round-trip — all of which the raw TTFB probe excluded. Five real clips transcribed verbatim and correctly. This is the single largest stage in the pipeline; a client-side socket opened before the user speaks is the only structural way to reduce it.
+
 **Embedding:** `all-MiniLM-L6-v2` at **11.8 ms/query** (p50 11.8, max 13.3). Import + model load is ~17.5 s — startup cost, not per-query; the systemd unit allows `TimeoutStartSec=300`.
 
 **HuggingFace throughput:** **74 MB/s from the instance** versus 4.8 MB/s from a residential laptop — 15× faster. Ingestion and index building therefore run *on the instance*; nothing GB-scale is uploaded. Measured: `scripts/ingest_dataset.py` completed 10,000 rows in **35 s including the 3.7 GB download**, peak RSS **3.82 GB**.

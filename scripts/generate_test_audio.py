@@ -8,9 +8,19 @@ a stable percentile, not semantic variety.
 """
 
 import os
+import shutil
 from pathlib import Path
 
 DEFAULT_OUTPUT_DIR = "data/benchmark_audio"
+
+# Pre-generated 16kHz mono PCM clips committed to the repo. Preferred over
+# synthesizing, because the ElevenLabs API key is scoped to Speech-to-Text
+# only -- TTS returns 401 "missing the permission text_to_speech", and
+# widening the key just to build benchmark fixtures is the wrong trade.
+# Regenerate on macOS with:
+#   say -o q.aiff "<question>"
+#   afconvert -f WAVE -d LEI16@16000 -c 1 q.aiff q.wav   # then strip 44-byte header
+FIXTURE_DIR = "assets/benchmark_audio"
 
 TEST_QUESTIONS = [
     "What was the immediate impact of the Manhattan Project?",
@@ -26,6 +36,12 @@ def synthesize_test_audio(output_dir: str = DEFAULT_OUTPUT_DIR) -> list[str]:
     audio_paths = [
         Path(output_dir) / f"question_{i}.pcm" for i in range(len(TEST_QUESTIONS))
     ]
+    # Committed fixtures first; TTS only for anything they don't cover.
+    for i, path in enumerate(audio_paths):
+        fixture = Path(FIXTURE_DIR) / f"question_{i}.pcm"
+        if not path.exists() and fixture.exists():
+            shutil.copyfile(fixture, path)
+
     missing = [
         (path, q) for path, q in zip(audio_paths, TEST_QUESTIONS) if not path.exists()
     ]
