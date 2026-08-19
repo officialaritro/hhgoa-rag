@@ -31,7 +31,10 @@ def _call_model(prompt: str) -> str:
     from anthropic import Anthropic
 
     client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-    model_id = os.environ.get("ANTHROPIC_MODEL_ID", _DEFAULT_MODEL_ID)
+    model_id = os.environ.get("CLAUDE_MODEL_ID", "claude-haiku-4-5-20251001")
+    if model_id == "claude-haiku-4-5":
+        model_id = "claude-haiku-4-5-20251001"
+    
     message = client.messages.create(
         model=model_id,
         max_tokens=_MAX_TOKENS,
