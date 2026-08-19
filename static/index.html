@@ -2,58 +2,305 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Voice-Enabled RAG Pipeline</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <meta name="theme-color" content="#0a0a0f" />
+  <title>Voice AI Pipeline</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
   <style>
-    :root { color-scheme: light dark; }
+    :root {
+      --bg: #0a0a0f;
+      --bg-radial: radial-gradient(circle at 50% 30%, #1a1a2e 0%, #0a0a0f 70%);
+      --text: #e2e8f0;
+      --text-muted: #94a3b8;
+      --accent: #6366f1;
+      --accent-glow: rgba(99, 102, 241, 0.4);
+      --red: #ef4444;
+      --glass: rgba(255, 255, 255, 0.03);
+      --glass-border: rgba(255, 255, 255, 0.08);
+      color-scheme: dark;
+    }
+    
+    * { box-sizing: border-box; }
+    
     body {
-      font: 15px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif;
-      max-width: 44rem; margin: 2.5rem auto; padding: 0 1.25rem;
+      margin: 0;
+      padding: 0;
+      font-family: 'Inter', -apple-system, sans-serif;
+      background: var(--bg);
+      background-image: var(--bg-radial);
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      overflow-x: hidden;
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
     }
-    h1 { font-size: 1.35rem; margin-bottom: .25rem; }
-    .sub { opacity: .7; margin-top: 0; }
-    fieldset { border: 1px solid #8884; border-radius: 6px; margin: 1.25rem 0; }
-    legend { padding: 0 .4rem; opacity: .75; font-size: .85rem; }
-    #recordBtn {
-      font: inherit; font-weight: 600; padding: .7rem 1.4rem;
-      border-radius: 6px; cursor: pointer; touch-action: none;
+
+    /* Strategy Pill Selector */
+    .header {
+      width: 100%;
+      padding: 2rem 1.5rem;
+      display: flex;
+      justify-content: center;
+      z-index: 10;
     }
-    #recordBtn[disabled] { cursor: not-allowed; opacity: .5; }
-    #status { min-height: 1.4em; opacity: .8; }
-    h3 { font-size: .8rem; text-transform: uppercase; letter-spacing: .06em;
-         opacity: .6; margin-bottom: .3rem; }
-    #transcript, #answer { margin-top: 0; }
-    #answer { font-size: 1.05rem; }
-    .refusal { color: #cf222e; font-weight: 600; }
-    table { border-collapse: collapse; font-variant-numeric: tabular-nums; }
-    td { padding: .12rem .9rem .12rem 0; }
-    td.n { text-align: right; }
-    .total td { border-top: 1px solid #8884; font-weight: 600; padding-top: .3rem; }
-    .warn { color: #cf222e; font-weight: 600; }
+    
+    .strategy-group {
+      display: flex;
+      background: var(--glass);
+      border: 1px solid var(--glass-border);
+      border-radius: 999px;
+      padding: 4px;
+      gap: 4px;
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+    }
+    
+    .strategy-group label {
+      padding: 6px 16px;
+      border-radius: 999px;
+      font-size: 0.85rem;
+      font-weight: 500;
+      color: var(--text-muted);
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+    
+    .strategy-group input { display: none; }
+    .strategy-group input:checked + label {
+      background: rgba(255, 255, 255, 0.1);
+      color: #fff;
+    }
+
+    /* Central Mic UI */
+    .mic-container {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      position: relative;
+      width: 100%;
+      min-height: 300px;
+    }
+    
+    .mic-status-text {
+      position: absolute;
+      top: 10%;
+      font-size: 0.9rem;
+      font-weight: 500;
+      color: var(--text-muted);
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      opacity: 0;
+      transition: opacity 0.3s;
+    }
+
+    .visualizer-canvas {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      width: 300px;
+      height: 300px;
+      pointer-events: none;
+      z-index: 1;
+      opacity: 0;
+      transition: opacity 0.3s;
+    }
+
+    .mic-button {
+      position: relative;
+      width: 80px;
+      height: 80px;
+      border-radius: 50%;
+      background: var(--glass);
+      border: 1px solid var(--glass-border);
+      color: var(--text);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      z-index: 2;
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+      transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+      touch-action: none;
+      user-select: none;
+      -webkit-user-select: none;
+      box-shadow: 0 0 30px rgba(0,0,0,0.5);
+    }
+    
+    .mic-button svg {
+      width: 32px;
+      height: 32px;
+      fill: currentColor;
+      transition: transform 0.3s;
+    }
+    
+    .mic-button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    /* Glassmorphic Output Card */
+    .output-container {
+      width: 100%;
+      max-width: 600px;
+      padding: 0 1.5rem 2.5rem;
+      z-index: 10;
+      display: none;
+      flex-direction: column;
+      gap: 1.5rem;
+      transform: translateY(20px);
+      opacity: 0;
+      transition: all 0.5s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    .card {
+      background: var(--glass);
+      border: 1px solid var(--glass-border);
+      border-radius: 16px;
+      padding: 1.5rem;
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+    }
+
+    .card h3 {
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: var(--text-muted);
+      margin: 0 0 0.5rem 0;
+      font-weight: 600;
+    }
+
+    #transcript {
+      font-size: 1rem;
+      color: var(--text);
+      margin: 0;
+      font-style: italic;
+      opacity: 0.9;
+    }
+
+    #answer {
+      font-size: 1.1rem;
+      color: #fff;
+      margin: 0;
+      line-height: 1.6;
+    }
+    
+    #answer strong { color: var(--accent); font-weight: 600; }
+    .refusal { color: var(--red) !important; font-weight: 500; }
+    
+    /* Latency table */
+    table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; font-size: 0.85rem; }
+    td { padding: 0.4rem 0; border-bottom: 1px solid rgba(255,255,255,0.05); color: var(--text-muted); }
+    td.n { text-align: right; color: var(--text); }
+    .total td { border-bottom: none; border-top: 1px solid var(--glass-border); font-weight: 600; color: #fff; padding-top: 0.8rem; margin-top: 0.4rem; }
+
+    /* STATE MACHINE STYLES */
+    
+    /* State: idle */
+    body.state-idle .mic-status-text { opacity: 1; }
+    body.state-idle .mic-button {
+      animation: pulse-soft 3s infinite;
+    }
+
+    /* State: recording */
+    body.state-recording .mic-status-text { opacity: 1; color: var(--red); }
+    body.state-recording .mic-button {
+      transform: scale(1.1);
+      background: rgba(239, 68, 68, 0.15);
+      border-color: rgba(239, 68, 68, 0.4);
+      color: var(--red);
+      box-shadow: 0 0 40px rgba(239, 68, 68, 0.2);
+    }
+    body.state-recording .visualizer-canvas { opacity: 1; }
+
+    /* State: processing */
+    body.state-processing .mic-button {
+      animation: spin-pulse 1.5s infinite cubic-bezier(0.4, 0, 0.2, 1);
+      background: rgba(99, 102, 241, 0.15);
+      border-color: rgba(99, 102, 241, 0.4);
+      color: var(--accent);
+    }
+    body.state-processing .mic-status-text { opacity: 1; }
+    body.state-processing .output-container { display: flex; opacity: 0.5; }
+    body.state-processing #transcript, body.state-processing #answer, body.state-processing #latency { opacity: 0; }
+
+    /* State: done */
+    body.state-done .output-container {
+      display: flex;
+      opacity: 1;
+      transform: translateY(0);
+    }
+    body.state-done #answer { animation: reveal 0.6s ease forwards; }
+    body.state-done #transcript { animation: reveal 0.4s ease forwards; }
+    body.state-done #latency { animation: reveal 0.8s ease forwards; }
+    
+    /* State: error */
+    body.state-error .mic-button { border-color: var(--red); color: var(--red); }
+    body.state-error .output-container { display: flex; opacity: 1; transform: translateY(0); }
+
+    /* Animations */
+    @keyframes pulse-soft {
+      0% { box-shadow: 0 0 0 0 rgba(255,255,255,0.05); }
+      70% { box-shadow: 0 0 0 20px rgba(255,255,255,0); }
+      100% { box-shadow: 0 0 0 0 rgba(255,255,255,0); }
+    }
+    @keyframes spin-pulse {
+      0% { transform: scale(1); box-shadow: 0 0 20px var(--accent-glow); }
+      50% { transform: scale(0.95); box-shadow: 0 0 40px var(--accent-glow); }
+      100% { transform: scale(1); box-shadow: 0 0 20px var(--accent-glow); }
+    }
+    @keyframes reveal {
+      from { opacity: 0; filter: blur(4px); transform: translateY(10px); }
+      to { opacity: 1; filter: blur(0); transform: translateY(0); }
+    }
   </style>
 </head>
-<body>
-  <h1>Voice-Enabled RAG Pipeline</h1>
-  <p class="sub">Hold the button, ask a question, release to send.</p>
+<body class="state-idle">
+  
+  <div class="header">
+    <div class="strategy-group" id="strategyChoices">
+      <span style="font-size: 0.8rem; padding: 6px 16px; color: var(--text-muted);">Loading...</span>
+    </div>
+  </div>
 
-  <p id="micWarning" class="warn" hidden></p>
+  <div class="mic-container">
+    <div id="statusText" class="mic-status-text">Hold to speak</div>
+    <canvas id="visualizer" class="visualizer-canvas" width="300" height="300"></canvas>
+    
+    <button id="recordBtn" class="mic-button" aria-label="Hold to record">
+      <svg viewBox="0 0 24 24">
+        <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z"/>
+        <path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/>
+      </svg>
+    </button>
+  </div>
 
-  <fieldset>
-    <legend>Chunking strategy</legend>
-    <div id="strategyChoices">loading…</div>
-  </fieldset>
-
-  <button id="recordBtn" type="button">Hold to speak</button>
-  <p id="status"></p>
-
-  <h3>Transcript</h3>
-  <p id="transcript"></p>
-
-  <h3>Answer</h3>
-  <p id="answer"></p>
-
-  <h3>Latency</h3>
-  <div id="latency"></div>
+  <div class="output-container" id="outputContainer">
+    <div class="card">
+      <h3>Transcript</h3>
+      <p id="transcript"></p>
+    </div>
+    
+    <div class="card">
+      <h3>Answer</h3>
+      <p id="answer"></p>
+    </div>
+    
+    <div class="card">
+      <h3>Latency</h3>
+      <div id="latency"></div>
+    </div>
+  </div>
 
   <script src="/static/app.js"></script>
 </body>

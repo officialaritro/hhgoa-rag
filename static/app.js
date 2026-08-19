@@ -1,27 +1,24 @@
-// Microphone capture for the voice RAG demo.
-//
-// Captures raw 16kHz PCM (not MediaRecorder's compressed WebM output) to
-// match app/stt.py's ElevenLabs Realtime call, which requires
-// AudioFormat.PCM_16000 -- see plan Task 5 / Global Constraints.
-//
-// SHORTCUT: uses the deprecated ScriptProcessorNode instead of an
-// AudioWorklet module for simplicity. Still functional in current Chrome.
-// Upgrade trigger: if ScriptProcessorNode support is ever removed from the
-// browsers used for the demo.
-
 let audioContext;
 let sourceNode;
 let processorNode;
+let analyserNode;
 let mediaStream;
 let capturedChunks = [];
 let recording = false;
 let selectedStrategy = "fixed_size";
+let animationId;
 
 const $ = (id) => document.getElementById(id);
 
-// getUserMedia is a secure-context-only API: over plain HTTP
-// navigator.mediaDevices is undefined and recording fails with no visible
-// error. Detect it up front rather than throwing on first click.
+function setState(state) {
+  document.body.className = `state-${state}`;
+}
+
+function parseMarkdown(text) {
+  if (!text) return "";
+  return text.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+}
+
 function micAvailable() {
   return !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
 }
@@ -57,19 +54,70 @@ function floatTo16BitPCM(float32Array) {
   return new Uint8Array(buffer);
 }
 
+function drawVisualizer() {
+  const canvas = $("visualizer");
+  const ctx = canvas.getContext("2d");
+  const width = canvas.width;
+  const height = canvas.height;
+  
+  if (!analyserNode || !recording) {
+    ctx.clearRect(0, 0, width, height);
+    return;
+  }
+  
+  const bufferLength = analyserNode.frequencyBinCount;
+  const dataArray = new Uint8Array(bufferLength);
+  analyserNode.getByteTimeDomainData(dataArray);
+  
+  ctx.clearRect(0, 0, width, height);
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = "rgba(239, 68, 68, 0.8)";
+  ctx.beginPath();
+  
+  const centerX = width / 2;
+  const centerY = height / 2;
+  const baseRadius = 60;
+  
+  for (let i = 0; i < bufferLength; i++) {
+    const v = dataArray[i] / 128.0; 
+    const mappedV = 1.0 + (v - 1.0) * 1.5; 
+    const radius = baseRadius + (mappedV * 15);
+    
+    const angle = (i / bufferLength) * 2 * Math.PI;
+    const x = centerX + radius * Math.cos(angle);
+    const y = centerY + radius * Math.sin(angle);
+    
+    if (i === 0) {
+      ctx.moveTo(x, y);
+    } else {
+      ctx.lineTo(x, y);
+    }
+  }
+  
+  ctx.closePath();
+  ctx.stroke();
+  
+  animationId = requestAnimationFrame(drawVisualizer);
+}
+
 async function startRecording() {
   if (recording || !micAvailable()) return;
   recording = true;
   capturedChunks = [];
+  setState("recording");
+  
   try {
     mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
   } catch (err) {
     recording = false;
-    $("status").textContent = "Microphone access denied.";
+    setState("error");
+    $("statusText").textContent = "Microphone access denied.";
     return;
   }
   
   sourceNode = audioContext.createMediaStreamSource(mediaStream);
+  analyserNode = audioContext.createAnalyser();
+  analyserNode.fftSize = 128;
   processorNode = audioContext.createScriptProcessor(4096, 1, 1);
 
   processorNode.onaudioprocess = (event) => {
@@ -78,9 +126,12 @@ async function startRecording() {
     capturedChunks.push(floatTo16BitPCM(resampled));
   };
 
-  sourceNode.connect(processorNode);
+  sourceNode.connect(analyserNode);
+  analyserNode.connect(processorNode);
   processorNode.connect(audioContext.destination);
-  $("status").textContent = "Recording…";
+  
+  $("statusText").textContent = "Recording...";
+  drawVisualizer();
 }
 
 function concatenateChunks(chunks) {
@@ -94,8 +145,6 @@ function concatenateChunks(chunks) {
   return combined;
 }
 
-// Stage keys are whatever app/main.py reports, so the table follows the
-// pipeline automatically if stages are added or renamed server-side.
 const STAGE_LABELS = {
   stt: "Speech-to-text",
   guardrail_unsafe: "Guardrail · unsafe input",
@@ -121,20 +170,14 @@ function renderLatency(data) {
 }
 
 function displayResult(data) {
-  $("transcript").textContent = data.transcript || "";
+  $("transcript").textContent = data.transcript ? `"${data.transcript}"` : "";
   const answerEl = $("answer");
   if (data.answer) {
-    answerEl.textContent = data.answer;
+    answerEl.innerHTML = parseMarkdown(data.answer);
     answerEl.className = "";
   } else {
-    // A refusal is a successful outcome, not an error -- show why. The top
-    // retrieval score is shown alongside the reason so a refusal can be told
-    // apart from a miscalibrated threshold without shell access to the box.
-    const score =
-      data.top_score != null ? ` (top match ${data.top_score.toFixed(3)})` : "";
-    answerEl.textContent = data.refusal_reason
-      ? `Cannot answer — ${data.refusal_reason}${score}`
-      : "";
+    const score = data.top_score != null ? ` (top match ${data.top_score.toFixed(3)})` : "";
+    answerEl.textContent = data.refusal_reason ? `Cannot answer — ${data.refusal_reason}${score}` : "";
     answerEl.className = "refusal";
   }
   renderLatency(data);
@@ -143,13 +186,18 @@ function displayResult(data) {
 async function stopRecording() {
   if (!recording || !processorNode) {
     recording = false;
+    setState("idle");
     return;
   }
   recording = false;
+  setState("processing");
+  if (animationId) cancelAnimationFrame(animationId);
+  
   processorNode.disconnect();
+  analyserNode.disconnect();
   sourceNode.disconnect();
   mediaStream.getTracks().forEach((track) => track.stop());
-  $("status").textContent = "Processing…";
+  $("statusText").textContent = "Processing...";
 
   const audioBytes = concatenateChunks(capturedChunks);
   try {
@@ -162,28 +210,23 @@ async function stopRecording() {
       },
     );
     displayResult(await response.json());
+    setState("done");
   } catch (err) {
     $("answer").textContent = `Request failed: ${err.message}`;
     $("answer").className = "refusal";
+    setState("error");
   }
-  $("status").textContent = "";
 }
 
-// Both chunking strategies are indexed; let the user pick which one answers.
-// Hard-coding one would waste the second index entirely.
 async function loadStrategies() {
   try {
-    const { strategies, default: def } = await (
-      await fetch("/api/strategies")
-    ).json();
+    const { strategies, default: def } = await (await fetch("/api/strategies")).json();
     selectedStrategy = def;
     $("strategyChoices").innerHTML = strategies
       .map(
         (s) =>
-          `<label style="margin-right:1.2rem">
-             <input type="radio" name="strategy" value="${s}" ${s === def ? "checked" : ""}>
-             ${s.replace("_", "-")}
-           </label>`,
+          `<input type="radio" id="strat_${s}" name="strategy" value="${s}" ${s === def ? "checked" : ""}>
+           <label for="strat_${s}">${s.replace("_", "-")}</label>`
       )
       .join("");
     for (const input of document.querySelectorAll('input[name="strategy"]')) {
@@ -192,23 +235,20 @@ async function loadStrategies() {
       });
     }
   } catch {
-    $("strategyChoices").textContent = "unavailable (service not ready)";
+    $("strategyChoices").innerHTML = '<span style="font-size: 0.8rem; padding: 6px 16px; color: var(--text-muted);">unavailable</span>';
   }
 }
 
 const recordButton = $("recordBtn");
 if (!micAvailable()) {
   recordButton.disabled = true;
-  const warning = $("micWarning");
-  warning.hidden = false;
-  warning.textContent = window.isSecureContext
-    ? "This browser does not expose a microphone API."
-    : "Microphone unavailable: this page must be served over HTTPS.";
+  setState("error");
+  $("statusText").textContent = window.isSecureContext
+    ? "No microphone API."
+    : "Must be HTTPS.";
 } else {
-  // Pointer events, not mousedown/mouseup: mouseup fires on the element the
-  // cursor is over, so releasing off the button would leave it recording
-  // forever. Pointer capture keeps the release bound to the button, and the
-  // same handlers cover touch on a phone.
+  recordButton.addEventListener("touchstart", (e) => e.preventDefault(), { passive: false });
+  
   recordButton.addEventListener("pointerdown", (e) => {
     recordButton.setPointerCapture(e.pointerId);
     if (!audioContext) {
