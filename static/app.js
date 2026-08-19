@@ -270,6 +270,23 @@ function displayCompareResult(data) {
   $("compareContainer").style.display = "grid";
 }
 
+function teardownAudioGraph() {
+  if (animationId) cancelAnimationFrame(animationId);
+  processorNode.disconnect();
+  analyserNode.disconnect();
+  sourceNode.disconnect();
+  mediaStream.getTracks().forEach((track) => track.stop());
+}
+
+function cancelRecording() {
+  if (!recording || !processorNode) return;
+  recording = false;
+  teardownAudioGraph();
+  capturedChunks = [];
+  setState("idle");
+  $("statusText").textContent = "Hold to speak";
+}
+
 async function stopRecording() {
   if (!recording || !processorNode) {
     recording = false;
@@ -289,12 +306,7 @@ async function stopRecording() {
     $("compareContainer").style.display = "none";
   }
   setState("processing");
-  if (animationId) cancelAnimationFrame(animationId);
-
-  processorNode.disconnect();
-  analyserNode.disconnect();
-  sourceNode.disconnect();
-  mediaStream.getTracks().forEach((track) => track.stop());
+  teardownAudioGraph();
   $("statusText").textContent = "Processing...";
 
   const audioBytes = concatenateChunks(capturedChunks);
@@ -382,18 +394,28 @@ if (!micAvailable()) {
   recordButton.addEventListener("pointercancel", stopRecording);
 
   // Hold-space-to-speak, Wispr Flow-style: works from anywhere on the page,
-  // not just while the mic button itself is focused. `e.repeat` guards
-  // against the OS's key-repeat firing keydown dozens of times while held;
-  // without it, every repeat would call startRecording() again.
+  // not just while the mic button itself is focused.
   document.addEventListener("keydown", (e) => {
-    if (e.code !== "Space" || e.repeat || recording) return;
+    if (e.code !== "Space") return;
+    // preventDefault on every Space keydown, not just the first -- held keys
+    // fire repeated keydown events at the OS repeat rate, and skipping this
+    // for the `recording`-guarded repeats (as an early-return above it would)
+    // left every repeat free to page-scroll even though the first didn't.
     e.preventDefault();
+    if (e.repeat || recording) return;
     primeAudioContextAndStart();
   });
   document.addEventListener("keyup", (e) => {
     if (e.code !== "Space") return;
     e.preventDefault();
     stopRecording();
+  });
+  // Esc drops an in-progress recording without submitting it, so the user
+  // can re-record fresh instead of waiting out a bad take.
+  document.addEventListener("keydown", (e) => {
+    if (e.code !== "Escape" || !recording) return;
+    e.preventDefault();
+    cancelRecording();
   });
 }
 
