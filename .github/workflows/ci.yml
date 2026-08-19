@@ -82,3 +82,21 @@ jobs:
             exit 1
           fi
           echo "bind address is loopback"
+
+  deploy:
+    name: deploy to aws
+    needs: [test, shell, guard]
+    # Only deploy if all tests pass on the main branch
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger deployment on EC2
+        env:
+          SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+          HOST: 13.234.228.244
+        run: |
+          mkdir -p ~/.ssh
+          echo "$SSH_KEY" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          # deploy.sh already runs `git fetch` and `git reset --hard origin/main`
+          ssh -o StrictHostKeyChecking=no ubuntu@$HOST 'cd /opt/hhgoa-rag && sudo -u ubuntu bash deploy/deploy.sh origin/main'
