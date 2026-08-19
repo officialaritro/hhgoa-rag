@@ -34,7 +34,7 @@ def _call_model(prompt: str) -> str:
     model_id = os.environ.get("CLAUDE_MODEL_ID", "claude-haiku-4-5-20251001")
     if model_id == "claude-haiku-4-5":
         model_id = "claude-haiku-4-5-20251001"
-    
+
     message = client.messages.create(
         model=model_id,
         max_tokens=_MAX_TOKENS,
