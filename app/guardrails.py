@@ -6,6 +6,7 @@ literal constants below with a one-line note; Task 9's benchmark run is the
 first real signal on whether they need retuning (plan Key Decisions, Task 7).
 """
 
+import os
 import re
 
 from pydantic import BaseModel
@@ -13,8 +14,25 @@ from pydantic import BaseModel
 from app.embeddings import cosine_similarity, embed
 from app.schemas import RetrievalOutput
 
-_DEFAULT_OFFTOPIC_THRESHOLD = 0.3
-_DEFAULT_GROUNDEDNESS_THRESHOLD = 0.5
+def _threshold(env_var: str, default: float) -> float:
+    """Read a guardrail threshold from the environment, falling back to the
+    documented default. These are meant to be retuned against measured score
+    distributions (scripts/tune_thresholds.py), and retuning should not
+    require a code change -- set the value in .env and restart."""
+    raw = os.environ.get(env_var, "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+# Starting values, chosen before the corpus existed. scripts/tune_thresholds.py
+# measures the distributions these are supposed to separate and recommends
+# replacements; override via the env vars rather than editing these.
+_DEFAULT_OFFTOPIC_THRESHOLD = _threshold("OFFTOPIC_SIMILARITY_THRESHOLD", 0.3)
+_DEFAULT_GROUNDEDNESS_THRESHOLD = _threshold("GROUNDEDNESS_SIMILARITY_THRESHOLD", 0.5)
 
 # Chosen empirically as an illustrative starting set for the MVP guardrail,
 # not an exhaustive safety classifier. Env-overridable is left for Task 9

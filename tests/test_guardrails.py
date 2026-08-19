@@ -75,3 +75,25 @@ def test_check_groundedness_flags_when_similarity_below_threshold(mock_embed):
 
     assert result.passed is False
     assert result.reason == "ungrounded"
+
+
+# Thresholds are read at import time, so these exercise the reader directly
+# rather than trying to mutate a module constant after the fact.
+def test_threshold_reads_the_env_var_when_set(monkeypatch):
+    from app.guardrails import _threshold
+
+    monkeypatch.setenv("SOME_THRESHOLD", "0.42")
+    assert _threshold("SOME_THRESHOLD", 0.3) == 0.42
+
+
+def test_threshold_falls_back_when_unset_blank_or_unparseable(monkeypatch):
+    """A blank or malformed value must not crash the service at import time --
+    it silently falls back to the documented default."""
+    from app.guardrails import _threshold
+
+    monkeypatch.delenv("SOME_THRESHOLD", raising=False)
+    assert _threshold("SOME_THRESHOLD", 0.3) == 0.3
+    monkeypatch.setenv("SOME_THRESHOLD", "   ")
+    assert _threshold("SOME_THRESHOLD", 0.3) == 0.3
+    monkeypatch.setenv("SOME_THRESHOLD", "not-a-number")
+    assert _threshold("SOME_THRESHOLD", 0.3) == 0.3
