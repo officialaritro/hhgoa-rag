@@ -190,5 +190,5 @@ def test_load_index_refuses_an_index_built_by_a_different_model(mock_embed, tmp_
 
     # Matching model still loads.
     with patch("app.indexing.active_model_name", return_value="model-A"):
-        index, metadata = load_index(str(index_path), str(metadata_path))
+        _, metadata = load_index(str(index_path), str(metadata_path))
         assert len(metadata) == 1

@@ -22,3 +22,6 @@ data/
 
 # OS
 .DS_Store
+
+# macOS AppleDouble metadata (created by tar/scp from a Mac)
+._*
