@@ -10,7 +10,22 @@ from typing import Any
 import faiss
 import numpy as np
 
-from app.embeddings import embed_batch
+from app.embeddings import active_model_name, embed_batch
+
+
+class IndexModelMismatch(RuntimeError):
+    """An index was built with a different embedding model than is now active.
+
+    This is the dangerous case, because nothing crashes on its own: both models
+    emit 384-dim vectors, so FAISS searches happily and returns neighbours from
+    an unrelated vector space. The answers look plausible and are meaningless.
+    It happened in practice -- .env pointed at bge-small while the indices were
+    built with all-MiniLM -- so the manifest below makes it loud instead.
+    """
+
+
+def _manifest_path(index_path: str) -> Path:
+    return Path(index_path).with_suffix(".manifest.json")
 
 
 def build_index(chunks_path: str, index_path: str, metadata_path: str) -> int:
@@ -41,6 +56,16 @@ def build_index(chunks_path: str, index_path: str, metadata_path: str) -> int:
     faiss.write_index(index, index_path)
     with open(metadata_path, "wb") as f:
         pickle.dump(metadata, f)
+    _manifest_path(index_path).write_text(
+        json.dumps(
+            {
+                "embedding_model": active_model_name(),
+                "dimension": int(dimension),
+                "chunks": len(metadata),
+            },
+            indent=2,
+        )
+    )
 
     return len(metadata)
 
@@ -51,4 +76,19 @@ def load_index(
     index = faiss.read_index(index_path)
     with open(metadata_path, "rb") as f:
         metadata = pickle.load(f)
+
+    # Refuse to serve an index built by a different model rather than return
+    # confident nonsense. Indices predating manifests load with a warning.
+    manifest_file = _manifest_path(index_path)
+    if manifest_file.exists():
+        built_with = json.loads(manifest_file.read_text()).get("embedding_model")
+        active = active_model_name()
+        if built_with and built_with != active:
+            raise IndexModelMismatch(
+                f"{index_path} was built with {built_with!r} but "
+                f"EMBEDDING_MODEL_NAME is {active!r}. Retrieval would search an "
+                f"unrelated vector space and return plausible nonsense. Either set "
+                f"EMBEDDING_MODEL_NAME={built_with!r} or rebuild the indices."
+            )
+
     return index, metadata

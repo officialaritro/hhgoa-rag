@@ -16,6 +16,13 @@ from numpy.typing import NDArray
 _DEFAULT_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 
 
+def active_model_name() -> str:
+    """The embedding model this process will use. Recorded in the index
+    manifest at build time and checked at load time, so a mismatch fails
+    loudly instead of silently searching the wrong vector space."""
+    return os.environ.get("EMBEDDING_MODEL_NAME", _DEFAULT_MODEL_NAME)
+
+
 @lru_cache(maxsize=1)
 def _get_model():
     from sentence_transformers import SentenceTransformer

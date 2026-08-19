@@ -5,6 +5,7 @@ Run: uvicorn app.main:app --host 0.0.0.0 --port 8000
 (see docs/plans/2026-08-18-voice-enabled-rag-pipeline.md -> Runtime Environment)
 """
 
+import logging
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -19,6 +20,8 @@ from app.generation import generate_answer
 from app.guardrails import check_groundedness, check_off_topic, check_unsafe_input
 from app.retrieval import retrieve
 from app.stt import transcribe
+
+logger = logging.getLogger("uvicorn.error")
 
 _DEFAULT_STRATEGY = "fixed_size"
 _STRATEGIES = ("fixed_size", "semantic")
@@ -37,8 +40,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         for strategy in _STRATEGIES:
             retrieve(query="warmup", strategy=strategy, k=1)
         _ready = True
-    except Exception:  # noqa: BLE001 -- intentional: any startup failure means not-ready, not a crash
+        logger.info("startup: indices loaded, service ready")
+    except Exception:  # noqa: BLE001 -- any startup failure means not-ready, not a crash
         _ready = False
+        # Log the traceback. Swallowing it silently left /health returning 503
+        # with no way to tell whether the cause was a missing index, an
+        # unreadable model cache, or a model mismatch -- all of which happened.
+        logger.exception("startup: warm-up failed, service will report not-ready")
     yield
 
 

@@ -14,6 +14,10 @@ APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SERVICE_NAME="voice-rag"
 SERVICE_USER="$(whoami)"
 PUBLIC_HOST="ragingoa.duckdns.org"
+# Model cache lives inside the app dir, not $HOME. systemd hardening
+# (ProtectHome) makes /home unreadable to the service, and a service that
+# cannot read its cached model fails startup with no obvious cause.
+HF_CACHE_DIR="${APP_DIR}/.cache/huggingface"
 PREFLIGHT_DIR="/opt/hhgoa-rag-preflight"
 
 echo "==> Installing system dependencies"
@@ -32,6 +36,13 @@ if ! command -v caddy >/dev/null 2>&1; then
   curl -1sLf https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt \
     | sudo tee /etc/apt/sources.list.d/caddy-stable.list > /dev/null
   sudo apt-get update -y && sudo apt-get install -y caddy
+fi
+
+echo "==> Model cache directory"
+mkdir -p "$HF_CACHE_DIR"
+# Adopt any cache already downloaded under $HOME so a re-run does not refetch ~4GB.
+if [ -d "$HOME/.cache/huggingface" ] && [ ! -e "$HF_CACHE_DIR/hub" ]; then
+  mv "$HOME/.cache/huggingface/"* "$HF_CACHE_DIR/" 2>/dev/null || true
 fi
 
 echo "==> Syncing Python dependencies via uv"
@@ -63,6 +74,7 @@ Type=simple
 User=${SERVICE_USER}
 WorkingDirectory=${APP_DIR}
 EnvironmentFile=${APP_DIR}/.env
+Environment=HF_HOME=${HF_CACHE_DIR}
 # Loopback only -- Caddy terminates TLS on 443 and proxies here. Binding
 # 0.0.0.0 would expose the app unencrypted on 8000 and break the microphone.
 ExecStart=$(command -v uv) run --project ${APP_DIR} uvicorn app.main:app --host 127.0.0.1 --port 8000
