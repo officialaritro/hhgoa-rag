@@ -8,6 +8,10 @@ def test_synthesize_test_audio_writes_one_file_per_question(
     mock_client_cls, tmp_path, monkeypatch
 ):
     monkeypatch.setenv("ELEVENLABS_API_KEY", "fake-key")
+    # Bypass the committed-fixture copy path so the TTS mock is actually used.
+    monkeypatch.setattr(
+        "scripts.generate_test_audio.FIXTURE_DIR", str(tmp_path / "no-such-dir")
+    )
     mock_client = mock_client_cls.return_value
     mock_client.voices.get_all.return_value.voices = [MagicMock(voice_id="v1")]
     mock_client.text_to_speech.convert.side_effect = lambda **kwargs: iter(
