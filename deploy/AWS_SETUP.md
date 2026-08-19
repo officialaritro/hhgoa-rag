@@ -14,20 +14,23 @@ This is a handover for whoever provisions AWS, so that person can work in parall
 
 Per the plan's hosting decision, this must be a single long-running instance, not Lambda/Fargate — a warm, in-memory FAISS index and embedding model are load-bearing for the latency target, and cold starts work directly against it.
 
-- **Instance type:** `t3.small` (2 vCPU / 2 GiB RAM), chosen for budget reasons over the `t3.medium` a naive float32 FAISS index would need. `app.indexing.build_index` persists both chunking strategies' vectors as an int8 scalar-quantized (`IndexScalarQuantizer`, `QT_8bit`) index rather than a raw `IndexFlatIP` — ~4x smaller in memory for a measured 99.6% top-5 retrieval agreement with the uncompressed index — and `app.retrieval` loads each strategy's index+metadata once per process instead of per request. Still watch actual RAM/CPU usage during Task 9's benchmark run; size up if constrained.
+- **Instance type:** `m7i-flex.large` (2 vCPU / 8 GB RAM, Sapphire Rapids). Chosen because it is free-tier-eligible on this account *and* beats the originally-planned `t3.medium` on both memory and clock — see the Free Plan constraint in the change log before changing it.
 - **AMI:** the latest Ubuntu LTS AMI (22.04 or 24.04) for your chosen region — pick it from the EC2 console or `aws ec2 describe-images` at launch time rather than hardcoding an AMI ID here, since AMI IDs are region-specific and change over time.
 - **Region:** pick the region closest to where judges/users will actually connect from, since network latency to the instance is part of the pipeline's measured latency (PRD Open Decision 4).
-- **Storage:** default EBS volume size is sufficient — the ingested corpus, chunks, and two FAISS indices are small relative to typical instance storage.
+- **Storage:** the 8 GiB default is **not** sufficient. Grow the root volume to 20 GiB. Note this is one-way — EBS volumes can be grown online but never shrunk.
 
 ### 2. Networking — security group rules
 
 | Direction | Port | Source | Purpose |
 |---|---|---|---|
 | Inbound | 22 (SSH) | Your IP only (not `0.0.0.0/0`) | Deployment and debugging access |
-| Inbound | 8000 | `0.0.0.0/0` | The live demo link (matches the app's `PORT`, Runtime Environment section of the plan) |
+| Inbound | 80 | `0.0.0.0/0` | Let's Encrypt HTTP-01 challenge + redirect to HTTPS |
+| Inbound | 443 | `0.0.0.0/0` | The live demo link, TLS-terminated by Caddy |
 | Outbound | all | `0.0.0.0/0` | Default — the app needs outbound HTTPS to reach the ElevenLabs and Anthropic APIs |
 
-If you later add a reverse proxy with TLS (see Optional below), open 443 instead of/alongside 8000 and keep 8000 internal.
+Port 8000 should **not** be open to the world — uvicorn binds `127.0.0.1` and Caddy proxies to it.
+
+> **SSH lock-out warning.** The rule pins a single Indian residential IP (`152.58.139.215/32`), which rotates. If SSH starts timing out, the instance is almost certainly fine — re-run `aws ec2 authorize-security-group-ingress` with your current address.
 
 ### 3. A stable address for the live link
 
@@ -41,20 +44,118 @@ No IAM role or instance profile is required for the application itself — it ma
 
 The instance should run the app as a systemd service (not a manually-started process in a terminal), so it survives SSH disconnects and instance reboots:
 
-- Start command: `uvicorn app.main:app --host 0.0.0.0 --port 8000` (matches the plan's Runtime Environment section)
+- Start command: `uvicorn app.main:app --host 127.0.0.1 --port 8000` (matches the plan's Runtime Environment section) — loopback only, Caddy fronts it
 - `Restart=on-failure` and `WantedBy=multi-user.target` so it comes back up automatically
 
 `deploy/setup.sh` (Task 10) is where this gets scripted — this document is the provisioning context that script assumes.
 
+## TLS is mandatory (this section was previously marked optional — it is not)
+
+`getUserMedia`/`MediaRecorder` are **secure-context-only** browser APIs. Served over plain HTTP on an IP or the EC2 public DNS, `navigator.mediaDevices` is `undefined`: the demo has no microphone and fails silently rather than with a debuggable error. A plain HTTP link does **not** satisfy "live working link" for a voice project.
+
+Let's Encrypt refuses to issue certificates for `*.compute.amazonaws.com`, so the instance's own public DNS name cannot be used. Register a free DuckDNS subdomain pointing at the Elastic IP and let Caddy auto-provision the certificate — see Task 10 of the implementation plan.
+
 ## Optional (not required for MVP submission)
 
-- **Domain name + TLS:** if you want `https://yourdomain.com` instead of a raw IP/DNS, add a Route 53 record (or point an existing domain) plus an nginx reverse proxy and a Let's Encrypt certificate via `certbot`. The PRD does not require this — a plain HTTP link on the Elastic IP/public DNS satisfies "live working link."
 - **Autoscaling / load balancing:** explicitly out of scope per the plan — one instance is deliberately sufficient for a demo audience.
 
 ## Cost
 
-AWS pricing varies by region and changes over time — check the [EC2 pricing page](https://aws.amazon.com/ec2/pricing/on-demand/) for current `t3.medium`/`t3.large` on-demand rates in your chosen region rather than relying on a fixed number here. For a ~4-day build-and-demo window, cost is unlikely to be the binding constraint.
+The instance type in use (`m7i-flex.large`) and the 20 GiB gp3 volume are both within free-tier-eligible bounds on this account's plan. Check the [EC2 pricing page](https://aws.amazon.com/ec2/pricing/on-demand/) for current `ap-south-1` rates if anything is added beyond this. For a ~4-day build-and-demo window, cost is not the binding constraint.
 
 ## Handback
 
-Once the instance, Elastic IP, and security group exist, hand back: the instance's public IP/DNS, the region, and confirmation that port 22 (from the deployer's IP) and port 8000 (public) are open. Task 10 takes it from there — deploying the code, running `deploy/setup.sh`, and pointing the systemd service at it.
+Once the instance, Elastic IP, and security group exist, hand back: the instance's public IP/DNS, the region, and confirmation that port 22 (from the deployer's IP) and ports 80/443 (public) are open. Task 10 takes it from there — deploying the code, running `deploy/setup.sh`, and pointing the systemd service at it.
+
+---
+
+## Infrastructure change log
+
+Applied 2026-08-19. Steps 1–5 are **done and verified**; steps 6–7 remain and depend on the application being deployed.
+
+| # | Change | Status |
+|---|---|---|
+| 1 | Instance type → `m7i-flex.large` (7.6 GB RAM) | **Done** |
+| 2 | Root volume 8 → 20 GiB gp3 | **Done** |
+| 3 | 2 GB swapfile, `vm.swappiness=10` | **Done** |
+| 4 | DuckDNS `ragingoa.duckdns.org` → `13.234.228.244` | **Done** |
+| 5 | Open ports 80 and 443 | **Done** |
+| 6 | Install Caddy, issue Let's Encrypt certificate | **Done** — valid to 16 Nov 2026 |
+| 7 | Revoke public port 8000 | **Done** — verified unreachable; only 22/80/443 remain |
+
+Verified final state: `i-09e157bfae9bb82a6`, `ap-south-1b`, `m7i-flex.large`, Xeon Platinum 8488C (Sapphire Rapids), 2 vCPU, 7778 MiB RAM, 19 G filesystem with 15 G free, 2 G swap active and persisted in `/etc/fstab`, Elastic IP `13.234.228.244` still associated.
+
+### The Free Plan constraint (read this before changing instance type again)
+
+This account is on the **AWS Free Plan**, which allows only free-tier-eligible instance types — both to launch *and* to resize into. The rejection message is actively misleading:
+
+```
+FreeTierRestrictionError: This operation is not available for free plan accounts.
+```
+
+That reads as `ModifyInstanceAttribute` being blocked wholesale. It is not — the *target type* was the problem. `t3.medium` is not free-tier-eligible; resizing to a type that is works fine. A `RunInstances --dry-run` for `t3.medium` also returns "would have succeeded", because DryRun does not evaluate the free-tier check — do not trust it as a pre-flight for this.
+
+Always check the permitted list first:
+
+```bash
+aws ec2 describe-instance-types --region ap-south-1 \
+  --filters Name=free-tier-eligible,Values=true \
+  --query 'InstanceTypes[].{Type:InstanceType,vCPU:VCpuInfo.DefaultVCpus,MiB:MemoryInfo.SizeInMiB}' --output table
+```
+
+In `ap-south-1` that currently yields `t3.micro` (1 GB), `t3.small` (2 GB), `t4g.micro`/`t4g.small` (ARM), **`c7i-flex.large` (4 GB)**, and **`m7i-flex.large` (8 GB)**. The two flex types beat the originally-planned `t3.medium` on both memory and clock speed, so the Free Plan cost nothing here.
+
+### AWS CLI session expiry
+
+This account authenticates via `aws login` (`login_session` in `~/.aws/config`), and the session goes stale after a few minutes idle, failing with `CreateOAuth2Token ... authorization grant is invalid`. A single `aws sts get-caller-identity` re-warms it. When scripting a batch of calls, wrap them:
+
+```bash
+awsr() {
+  local out rc; out=$(aws "$@" 2>&1); rc=$?
+  if [ $rc -ne 0 ] && printf '%s' "$out" | grep -q "CreateOAuth2Token"; then
+    aws sts get-caller-identity >/dev/null 2>&1
+    out=$(aws "$@" 2>&1); rc=$?
+  fi
+  printf '%s\n' "$out"; return $rc
+}
+```
+
+### Step 6 — Caddy and TLS (done)
+
+`deploy/setup.sh` installs and configures Caddy from `deploy/Caddyfile`. The certificate
+for `ragingoa.duckdns.org` was issued by Let's Encrypt and renews automatically. Caddy
+also serves `/preflight` from `/opt/hhgoa-rag-preflight`, independently of the app, so
+the browser-precondition check still works when the backend is down.
+
+The app binds `127.0.0.1:8000` and is reached only through Caddy.
+
+### Step 7 — public port 8000 revoked (done)
+
+Done 2026-08-19, after 443 was confirmed serving — 8000 had been the only remaining route to the app, so the ordering mattered. `curl --max-time 6 http://13.234.228.244:8000/health` now times out while `https://ragingoa.duckdns.org/health` returns 200. Inbound is down to 22 (restricted), 80 and 443.
+
+The command, for reference or if the rule is ever re-added:
+
+```bash
+aws ec2 revoke-security-group-ingress --group-id sg-01967e366d79ce0c8 --region ap-south-1 \
+  --protocol tcp --port 8000 --cidr 0.0.0.0/0
+```
+
+### Verification
+
+```bash
+curl -sS https://ragingoa.duckdns.org/health          # expect 200, valid cert
+curl -sS --max-time 5 http://13.234.228.244:8000/health || echo "correctly unreachable"
+ssh -i ~/.ssh/hhgoa-rag-key.pem ubuntu@13.234.228.244 'free -m; df -h /; swapon --show'
+```
+
+Then open the HTTPS URL in a browser and confirm the microphone permission prompt actually appears — that is the single check this whole section exists for.
+
+### If SSH stops working mid-build
+
+The rule pins one residential IP, which rotates. This is not an instance failure:
+
+```bash
+MYIP=$(curl -s https://checkip.amazonaws.com)
+aws ec2 authorize-security-group-ingress --group-id sg-01967e366d79ce0c8 --region ap-south-1 \
+  --protocol tcp --port 22 --cidr ${MYIP}/32
+```

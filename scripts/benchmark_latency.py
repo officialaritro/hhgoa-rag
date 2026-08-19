@@ -18,6 +18,10 @@ import numpy as np
 LATENCY_TARGET_MS = 200
 DEFAULT_WARMUP_QUERIES = 3
 DEFAULT_BATCH_SIZE = 30
+# httpx defaults to a 5s timeout. A full run is speech-to-text (~1.2s) plus
+# generation (~2-3s), so the default silently times out most requests and the
+# benchmark reports the timeout rather than the pipeline.
+REQUEST_TIMEOUT_SECONDS = 120.0
 
 
 def compute_percentiles(
@@ -68,7 +72,7 @@ def run_benchmark(
     if base_url:
         import httpx
 
-        with httpx.Client(base_url=base_url) as client:
+        with httpx.Client(base_url=base_url, timeout=REQUEST_TIMEOUT_SECONDS) as client:
             run_batch(client, warmup_paths)
             latencies_ms = run_batch(client, measured_paths)
     else:

@@ -1,0 +1,23 @@
+# TLS termination + reverse proxy for hhgoa-rag.
+# Caddy obtains and renews the Let's Encrypt certificate automatically.
+# The app binds 127.0.0.1:8000 and is never exposed directly.
+
+ragingoa.duckdns.org {
+	encode zstd gzip
+
+	# Preflight diagnostic — always available, independent of the app.
+	# Proves TLS + secure-context (microphone) without needing the backend up.
+	handle /preflight* {
+		root * /opt/hhgoa-rag-preflight
+		try_files /index.html
+		file_server
+	}
+
+	handle {
+		reverse_proxy 127.0.0.1:8000 {
+			health_uri /health
+			health_interval 10s
+			health_timeout 2s
+		}
+	}
+}

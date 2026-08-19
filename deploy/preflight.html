@@ -1,0 +1,53 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>hhgoa-rag preflight</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 15px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+         max-width: 46rem; margin: 3rem auto; padding: 0 1.25rem; }
+  h1 { font-size: 1.1rem; letter-spacing: .02em; }
+  .row { display: flex; gap: .75rem; padding: .5rem 0; border-bottom: 1px solid #8883; }
+  .k { flex: 1; } .v { font-weight: 600; }
+  .ok { color: #1a7f37; } .bad { color: #cf222e; } .warn { color: #9a6700; }
+  button { font: inherit; padding: .5rem 1rem; margin-top: 1.5rem; cursor: pointer; }
+  #mic { margin-top: 1rem; }
+</style>
+<h1>hhgoa-rag &mdash; deployment preflight</h1>
+<p>Verifies the browser preconditions the voice demo depends on. All rows must be green
+   before the microphone can work.</p>
+<div id="out"></div>
+<button id="ask">Request microphone permission</button>
+<div id="mic"></div>
+<script>
+  const out = document.getElementById('out');
+  function row(k, ok, v) {
+    const d = document.createElement('div');
+    d.className = 'row';
+    d.innerHTML = `<span class="k">${k}</span><span class="v ${ok ? 'ok' : 'bad'}">${v}</span>`;
+    out.appendChild(d);
+  }
+  row('Protocol', location.protocol === 'https:', location.protocol);
+  row('Secure context (window.isSecureContext)', window.isSecureContext, String(window.isSecureContext));
+  const hasMD = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+  row('navigator.mediaDevices.getUserMedia', hasMD, hasMD ? 'available' : 'UNDEFINED');
+  row('MediaRecorder', typeof MediaRecorder !== 'undefined',
+      typeof MediaRecorder !== 'undefined' ? 'available' : 'UNDEFINED');
+  row('WebSocket', typeof WebSocket !== 'undefined',
+      typeof WebSocket !== 'undefined' ? 'available' : 'UNDEFINED');
+  row('Host', true, location.host);
+
+  document.getElementById('ask').onclick = async () => {
+    const m = document.getElementById('mic');
+    if (!hasMD) { m.innerHTML = '<span class="bad">getUserMedia unavailable — not a secure context.</span>'; return; }
+    m.textContent = 'requesting…';
+    try {
+      const s = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const label = s.getAudioTracks()[0]?.label || '(unnamed device)';
+      m.innerHTML = `<span class="ok">GRANTED — capturing from: ${label}</span>`;
+      s.getTracks().forEach(t => t.stop());
+    } catch (e) {
+      m.innerHTML = `<span class="bad">${e.name}: ${e.message}</span>`;
+    }
+  };
+</script>
