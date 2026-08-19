@@ -131,7 +131,9 @@ The app binds `127.0.0.1:8000` and is reached only through Caddy.
 
 ### Step 7 — public port 8000 revoked (done)
 
-**Only after step 6 is confirmed working.** Port 8000 is currently the only route to the app; revoking it before Caddy serves 443 leaves no working path in.
+Done 2026-08-19, after 443 was confirmed serving — 8000 had been the only remaining route to the app, so the ordering mattered. `curl --max-time 6 http://13.234.228.244:8000/health` now times out while `https://ragingoa.duckdns.org/health` returns 200. Inbound is down to 22 (restricted), 80 and 443.
+
+The command, for reference or if the rule is ever re-added:
 
 ```bash
 aws ec2 revoke-security-group-ingress --group-id sg-01967e366d79ce0c8 --region ap-south-1 \
