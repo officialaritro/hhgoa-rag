@@ -1,7 +1,8 @@
-"""Anthropic Claude call for grounded answer generation, wrapped in the harness.
+"""OpenAI Chat Completions call for grounded answer generation, wrapped in
+the harness.
 
-Model: claude-haiku-4-5 (see .env.example / docs/ENVIRONMENT_VARIABLES.md) --
-the fastest/smallest current Claude tier, a starting point for the latency
+Model: gpt-5.4-mini-2026-03-17 (see .env.example / docs/ENVIRONMENT_VARIABLES.md)
+-- a small/fast current OpenAI tier, a starting point for the latency
 target. Confirm this is still current before deploying (Task 6 Key Decisions).
 """
 
@@ -10,7 +11,7 @@ import os
 from app.harness import StageResult, run_stage
 from app.schemas import GenerationOutput, RetrievalOutput
 
-_DEFAULT_MODEL_ID = "claude-haiku-4-5"
+_DEFAULT_MODEL_ID = "gpt-5.4-mini-2026-03-17"
 _MAX_TOKENS = 512
 
 _SYSTEM_PROMPT = (
@@ -28,17 +29,19 @@ def _build_prompt(query: str, retrieval: RetrievalOutput) -> str:
 
 
 def _call_model(prompt: str) -> str:
-    import anthropic
+    from openai import OpenAI
 
-    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-    model_id = os.environ.get("CLAUDE_MODEL_ID", _DEFAULT_MODEL_ID)
-    response = client.messages.create(
+    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+    model_id = os.environ.get("OPENAI_MODEL_ID", _DEFAULT_MODEL_ID)
+    completion = client.chat.completions.create(
         model=model_id,
-        max_tokens=_MAX_TOKENS,
-        system=_SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": prompt}],
+        max_completion_tokens=_MAX_TOKENS,
+        messages=[
+            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
+        ],
     )
-    return "".join(block.text for block in response.content if block.type == "text")
+    return completion.choices[0].message.content or ""
 
 
 def generate_answer(query: str, retrieval: RetrievalOutput) -> StageResult:
