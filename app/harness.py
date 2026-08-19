@@ -20,5 +20,7 @@ def run_stage[T](fn: Callable[[], T], retries: int = 1) -> StageResult:
         try:
             return StageResult(ok=True, value=fn())
         except Exception as exc:  # noqa: BLE001 -- intentional: convert ANY external-call failure into a StageResult, never raise
+            import traceback
+            traceback.print_exc()
             last_error = str(exc)
     return StageResult(ok=False, value=None, error=last_error)
