@@ -17,6 +17,7 @@ from pydantic import BaseModel
 from app.embeddings import cosine_similarity, embed
 from app.schemas import RetrievalOutput
 
+
 def _threshold(env_var: str, default: float) -> float:
     """Read a guardrail threshold from the environment, falling back to the
     documented default. These are meant to be retuned against measured score

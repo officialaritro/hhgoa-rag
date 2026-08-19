@@ -1,0 +1,85 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+concurrency:
+  # A newer push to the same branch makes an in-flight run irrelevant.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (py${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.12 is what the EC2 instance actually runs; 3.14 is what
+        # .python-version selects for local development. They have diverged
+        # before, so both are tested rather than assumed equivalent.
+        python: ["3.12", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Sync dependencies
+        # pyproject pins torch to the CPU-only index; without it this pulls
+        # ~4.6 GB of unusable CUDA packages and is far slower.
+        run: uv sync --locked --all-groups --python ${{ matrix.python }}
+
+      - name: Lint
+        run: uv run ruff check --output-format github .
+
+      - name: Format check
+        run: uv run ruff format --check .
+
+      - name: Tests
+        run: uv run pytest -q
+
+  shell:
+    name: shell scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Syntax-check deploy scripts
+        run: |
+          for f in deploy/*.sh; do
+            echo "checking $f"
+            bash -n "$f"
+          done
+      - name: Shellcheck
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          # SC2086 (word splitting) is pervasive and intentional in these
+          # scripts; everything else is treated as a real finding.
+          shellcheck --severity=warning --exclude=SC2086 deploy/*.sh
+
+  guard:
+    name: config guards
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: .env must never be committed
+        run: |
+          if git ls-files --error-unmatch .env 2>/dev/null; then
+            echo "::error::.env is tracked in git -- it holds live API keys"
+            exit 1
+          fi
+          echo ".env is not tracked"
+      - name: The app must bind loopback, never 0.0.0.0
+        # Binding 0.0.0.0 serves the app unencrypted beside Caddy, and
+        # getUserMedia is secure-context-only -- the microphone dies silently.
+        run: |
+          if grep -rn -- "--host 0.0.0.0" deploy/ 2>/dev/null; then
+            echo "::error::deploy config binds 0.0.0.0; Caddy must front the app on loopback"
+            exit 1
+          fi
+          echo "bind address is loopback"

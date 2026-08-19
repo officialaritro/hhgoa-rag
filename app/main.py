@@ -41,7 +41,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             retrieve(query="warmup", strategy=strategy, k=1)
         _ready = True
         logger.info("startup: indices loaded, service ready")
-    except Exception:  # noqa: BLE001 -- any startup failure means not-ready, not a crash
+    except Exception:
         _ready = False
         # Log the traceback. Swallowing it silently left /health returning 503
         # with no way to tell whether the cause was a missing index, an
@@ -133,9 +133,7 @@ async def ask(
     transcript = stt_result.value.transcript
     if not transcript.strip():
         return JSONResponse(
-            _refusal(
-                "could not understand audio", _elapsed_ms(start), stages, strategy
-            )
+            _refusal("could not understand audio", _elapsed_ms(start), stages, strategy)
         )
 
     # Cheapest check first: pure regex, no model call, so it costs nothing to

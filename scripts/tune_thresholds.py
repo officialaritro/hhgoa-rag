@@ -94,7 +94,9 @@ def tune(corpus_path: str, strategy: str, sample: int, seed: int) -> dict[str, A
 
     print("OFF-TOPIC THRESHOLD (top retrieval score)")
     in_corpus = [retrieve(r["query"], strategy, k=5).passages[0].score for r in picked]
-    off_topic = [retrieve(q, strategy, k=5).passages[0].score for q in OFF_TOPIC_QUERIES]
+    off_topic = [
+        retrieve(q, strategy, k=5).passages[0].score for q in OFF_TOPIC_QUERIES
+    ]
     _report("in-corpus queries", _percentiles(in_corpus))
     _report("off-topic queries", _percentiles(off_topic))
     off_rec = _recommend(in_corpus, off_topic)

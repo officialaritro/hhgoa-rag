@@ -66,7 +66,9 @@ def test_extract_transcript_reads_the_text_key_from_a_real_payload():
 def test_extract_transcript_is_empty_for_silence_or_missing_payload():
     from app.stt import extract_transcript
 
-    assert extract_transcript({"message_type": "committed_transcript", "text": ""}) == ""
+    assert (
+        extract_transcript({"message_type": "committed_transcript", "text": ""}) == ""
+    )
     assert extract_transcript({"message_type": "committed_transcript"}) == ""
     assert extract_transcript(None) == ""
 

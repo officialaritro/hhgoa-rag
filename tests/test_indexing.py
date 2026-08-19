@@ -150,9 +150,18 @@ def test_build_index_records_the_embedding_model_in_a_manifest(mock_embed, tmp_p
         [[1.0, 0.0, 0.0] for _ in texts], dtype="float32"
     )
     chunks_path = tmp_path / "chunks.jsonl"
-    _write_chunks(chunks_path, [{"text": "a", "source_passage": "a",
-                                 "is_selected": True, "query_id": 1,
-                                 "strategy": "fixed_size"}])
+    _write_chunks(
+        chunks_path,
+        [
+            {
+                "text": "a",
+                "source_passage": "a",
+                "is_selected": True,
+                "query_id": 1,
+                "strategy": "fixed_size",
+            }
+        ],
+    )
     index_path = tmp_path / "index.faiss"
     build_index(str(chunks_path), str(index_path), str(tmp_path / "meta.pkl"))
 
@@ -172,9 +181,18 @@ def test_load_index_refuses_an_index_built_by_a_different_model(mock_embed, tmp_
         [[1.0, 0.0, 0.0] for _ in texts], dtype="float32"
     )
     chunks_path = tmp_path / "chunks.jsonl"
-    _write_chunks(chunks_path, [{"text": "a", "source_passage": "a",
-                                 "is_selected": True, "query_id": 1,
-                                 "strategy": "fixed_size"}])
+    _write_chunks(
+        chunks_path,
+        [
+            {
+                "text": "a",
+                "source_passage": "a",
+                "is_selected": True,
+                "query_id": 1,
+                "strategy": "fixed_size",
+            }
+        ],
+    )
     index_path = tmp_path / "index.faiss"
     metadata_path = tmp_path / "meta.pkl"
     with patch("app.indexing.active_model_name", return_value="model-A"):
