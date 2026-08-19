@@ -26,6 +26,27 @@ function micAvailable() {
   return !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
 }
 
+function downsampleBuffer(buffer, sampleRate, outRate) {
+  if (outRate === sampleRate) return buffer;
+  const sampleRateRatio = sampleRate / outRate;
+  const newLength = Math.round(buffer.length / sampleRateRatio);
+  const result = new Float32Array(newLength);
+  let offsetResult = 0;
+  let offsetBuffer = 0;
+  while (offsetResult < result.length) {
+    const nextOffsetBuffer = Math.round((offsetResult + 1) * sampleRateRatio);
+    let accum = 0, count = 0;
+    for (let i = offsetBuffer; i < nextOffsetBuffer && i < buffer.length; i++) {
+      accum += buffer[i];
+      count++;
+    }
+    result[offsetResult] = accum / count;
+    offsetResult++;
+    offsetBuffer = nextOffsetBuffer;
+  }
+  return result;
+}
+
 function floatTo16BitPCM(float32Array) {
   const buffer = new ArrayBuffer(float32Array.length * 2);
   const view = new DataView(buffer);
@@ -40,14 +61,21 @@ async function startRecording() {
   if (recording || !micAvailable()) return;
   recording = true;
   capturedChunks = [];
-  mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-  audioContext = new AudioContext({ sampleRate: 16000 });
+  try {
+    mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (err) {
+    recording = false;
+    $("status").textContent = "Microphone access denied.";
+    return;
+  }
+  
   sourceNode = audioContext.createMediaStreamSource(mediaStream);
   processorNode = audioContext.createScriptProcessor(4096, 1, 1);
 
   processorNode.onaudioprocess = (event) => {
     const input = event.inputBuffer.getChannelData(0);
-    capturedChunks.push(floatTo16BitPCM(input));
+    const resampled = downsampleBuffer(input, audioContext.sampleRate, 16000);
+    capturedChunks.push(floatTo16BitPCM(resampled));
   };
 
   sourceNode.connect(processorNode);
@@ -113,7 +141,10 @@ function displayResult(data) {
 }
 
 async function stopRecording() {
-  if (!recording) return;
+  if (!recording || !processorNode) {
+    recording = false;
+    return;
+  }
   recording = false;
   processorNode.disconnect();
   sourceNode.disconnect();
@@ -180,6 +211,13 @@ if (!micAvailable()) {
   // same handlers cover touch on a phone.
   recordButton.addEventListener("pointerdown", (e) => {
     recordButton.setPointerCapture(e.pointerId);
+    if (!audioContext) {
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      audioContext = new AudioCtx({ sampleRate: 16000 });
+    }
+    if (audioContext.state === "suspended") {
+      audioContext.resume();
+    }
     startRecording();
   });
   recordButton.addEventListener("pointerup", stopRecording);
