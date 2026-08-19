@@ -53,6 +53,7 @@ async def _stream_transcript_async(audio_chunks: list[bytes]) -> str:
             "audio_format": AudioFormat.PCM_16000,
             "sample_rate": _SAMPLE_RATE,
             "commit_strategy": CommitStrategy.MANUAL,
+            "language_code": "eng",
         }
     )
 
