@@ -167,17 +167,19 @@ function buildLatencyChartHtml(stagesMs, totalMs) {
       const width = totalMs > 0 ? Math.max(2, (ms / totalMs) * 100) : 2;
       return `
         <div class="latency-bar-row">
-          <span class="latency-bar-label">${STAGE_LABELS[key] || key}</span>
+          <div class="latency-bar-topline">
+            <span class="latency-bar-label">${STAGE_LABELS[key] || key}</span>
+            <span class="latency-bar-value">${ms.toFixed(1)} ms</span>
+          </div>
           <div class="latency-bar-track">
             <div class="latency-bar-fill" style="width: ${width}%"></div>
           </div>
-          <span class="latency-bar-value">${ms.toFixed(1)} ms</span>
         </div>`;
     })
     .join("");
   const total =
     totalMs != null
-      ? `<div class="latency-bar-row total"><span class="latency-bar-label">Total</span><span class="latency-bar-value">${totalMs.toFixed(1)} ms</span></div>`
+      ? `<div class="latency-bar-row total"><div class="latency-bar-topline"><span class="latency-bar-label">Total</span><span class="latency-bar-value">${totalMs.toFixed(1)} ms</span></div></div>`
       : "";
   return rows || total ? `${rows}${total}` : "";
 }
@@ -231,7 +233,7 @@ function displayResult(data) {
   }
   renderLatency(data);
   renderCitations(data.passages, $("citations"));
-  $("outputContainer").style.display = "flex";
+  $("outputContainer").style.display = "grid";
   $("compareContainer").style.display = "none";
 }
 
@@ -265,7 +267,7 @@ function displayCompareResult(data) {
     }
   }
   $("outputContainer").style.display = "none";
-  $("compareContainer").style.display = "flex";
+  $("compareContainer").style.display = "grid";
 }
 
 async function stopRecording() {
@@ -275,6 +277,17 @@ async function stopRecording() {
     return;
   }
   recording = false;
+  // Show the destination container (dimmed via the state-processing CSS
+  // rule) before the fetch resolves -- otherwise the very first query of a
+  // fresh page load has no inline display set yet, so the "dimmed skeleton"
+  // effect silently doesn't render on that first request.
+  if (compareMode) {
+    $("compareContainer").style.display = "grid";
+    $("outputContainer").style.display = "none";
+  } else {
+    $("outputContainer").style.display = "grid";
+    $("compareContainer").style.display = "none";
+  }
   setState("processing");
   if (animationId) cancelAnimationFrame(animationId);
 
@@ -308,11 +321,11 @@ async function stopRecording() {
       $("compareRefusal").style.display = "block";
       document.querySelector("#compareContainer .compare-grid").style.display = "none";
       $("outputContainer").style.display = "none";
-      $("compareContainer").style.display = "flex";
+      $("compareContainer").style.display = "grid";
     } else {
       $("answer").textContent = `Request failed: ${err.message}`;
       $("answer").className = "refusal";
-      $("outputContainer").style.display = "flex";
+      $("outputContainer").style.display = "grid";
       $("compareContainer").style.display = "none";
     }
     setState("error");
@@ -340,6 +353,17 @@ async function loadStrategies() {
   }
 }
 
+function primeAudioContextAndStart() {
+  if (!audioContext) {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    audioContext = new AudioCtx({ sampleRate: 16000 });
+  }
+  if (audioContext.state === "suspended") {
+    audioContext.resume();
+  }
+  startRecording();
+}
+
 const recordButton = $("recordBtn");
 if (!micAvailable()) {
   recordButton.disabled = true;
@@ -349,20 +373,28 @@ if (!micAvailable()) {
     : "Must be HTTPS.";
 } else {
   recordButton.addEventListener("touchstart", (e) => e.preventDefault(), { passive: false });
-  
+
   recordButton.addEventListener("pointerdown", (e) => {
     recordButton.setPointerCapture(e.pointerId);
-    if (!audioContext) {
-      const AudioCtx = window.AudioContext || window.webkitAudioContext;
-      audioContext = new AudioCtx({ sampleRate: 16000 });
-    }
-    if (audioContext.state === "suspended") {
-      audioContext.resume();
-    }
-    startRecording();
+    primeAudioContextAndStart();
   });
   recordButton.addEventListener("pointerup", stopRecording);
   recordButton.addEventListener("pointercancel", stopRecording);
+
+  // Hold-space-to-speak, Wispr Flow-style: works from anywhere on the page,
+  // not just while the mic button itself is focused. `e.repeat` guards
+  // against the OS's key-repeat firing keydown dozens of times while held;
+  // without it, every repeat would call startRecording() again.
+  document.addEventListener("keydown", (e) => {
+    if (e.code !== "Space" || e.repeat || recording) return;
+    e.preventDefault();
+    primeAudioContextAndStart();
+  });
+  document.addEventListener("keyup", (e) => {
+    if (e.code !== "Space") return;
+    e.preventDefault();
+    stopRecording();
+  });
 }
 
 $("compareToggle").addEventListener("change", (e) => {

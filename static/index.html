@@ -131,6 +131,28 @@
       transition: opacity 0.3s;
     }
 
+    .mic-hint {
+      position: absolute;
+      bottom: 12%;
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+      font-size: 0.8rem;
+      color: var(--text-muted);
+      opacity: 0;
+      transition: opacity 0.3s;
+    }
+    .mic-hint kbd {
+      font-family: inherit;
+      font-size: 0.75rem;
+      padding: 2px 8px;
+      border-radius: 6px;
+      background: var(--glass);
+      border: 1px solid var(--glass-border);
+      color: var(--text);
+    }
+    body.state-idle .mic-hint { opacity: 1; }
+
     .visualizer-canvas {
       position: absolute;
       top: 50%;
@@ -178,18 +200,34 @@
       cursor: not-allowed;
     }
 
-    /* Glassmorphic Output Card */
+    /* Result Layout -- a wide dashboard grid once a query completes, not a
+       single narrow vertical stack. #outputContainer breaks into an
+       answer + sidebar row plus a full-width citations row at >=900px;
+       #compareContainer stays a single column here since its own
+       .compare-grid child already provides the two-up layout. */
     .output-container {
       width: 100%;
-      max-width: 600px;
-      padding: 0 1.5rem 2.5rem;
+      max-width: 1180px;
+      padding: 0 1.5rem 3rem;
       z-index: 10;
       display: none;
-      flex-direction: column;
-      gap: 1.5rem;
+      grid-template-columns: 1fr;
+      gap: 1.25rem;
       transform: translateY(20px);
       opacity: 0;
-      transition: all 0.5s cubic-bezier(0.16, 1, 0.3, 1);
+      transition: opacity 0.5s cubic-bezier(0.16, 1, 0.3, 1), transform 0.5s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    @media (min-width: 900px) {
+      #outputContainer {
+        grid-template-columns: 2fr 1fr;
+        grid-template-areas:
+          "answer sidebar"
+          "citations citations";
+      }
+      .result-answer-card { grid-area: answer; }
+      .result-latency-card { grid-area: sidebar; }
+      .result-citations-card { grid-area: citations; }
     }
 
     .card {
@@ -211,40 +249,34 @@
       font-weight: 600;
     }
 
-    #transcript {
-      font-size: 1rem;
-      color: var(--text);
-      margin: 0;
+    .result-transcript {
+      font-size: 0.85rem;
+      color: var(--text-muted);
+      margin: 0 0 1.25rem 0;
       font-style: italic;
       opacity: 0.9;
     }
 
     #answer {
-      font-size: 1.1rem;
+      font-size: 1.3rem;
       color: #fff;
       margin: 0;
-      line-height: 1.6;
+      line-height: 1.65;
     }
-    
+
     #answer strong { color: var(--accent); font-weight: 600; }
     .refusal { color: var(--red) !important; font-weight: 500; }
-    
-    /* Latency bar chart */
-    .latency-bar-row {
-      display: grid;
-      grid-template-columns: 11.5rem 1fr 4.5rem;
-      align-items: center;
-      gap: 0.6rem;
-      padding: 0.35rem 0;
-      font-variant-numeric: tabular-nums;
-      font-size: 0.78rem;
-    }
-    .latency-bar-label { color: var(--text-muted); line-height: 1.25; }
+
+    /* Latency bar chart -- label+value on one line, track full-width below,
+       so it reads cleanly whether it's sitting in a wide card or a narrow
+       sidebar/compare column. */
+    .latency-bar-row { padding: 0.5rem 0; font-variant-numeric: tabular-nums; font-size: 0.78rem; }
+    .latency-bar-topline { display: flex; justify-content: space-between; gap: 0.75rem; margin-bottom: 0.3rem; }
+    .latency-bar-label { color: var(--text-muted); }
+    .latency-bar-value { color: var(--text); }
     .latency-bar-track { height: 6px; border-radius: 999px; background: var(--glass); border: 1px solid var(--glass-border); overflow: hidden; }
     .latency-bar-fill { height: 100%; border-radius: 999px; background: var(--accent); transition: width 0.4s ease; }
-    .latency-bar-value { text-align: right; color: var(--text); }
     .latency-bar-row.total {
-      grid-template-columns: 11.5rem 4.5rem;
       margin-top: 0.4rem;
       padding-top: 0.8rem;
       border-top: 1px solid var(--glass-border);
@@ -253,13 +285,23 @@
     .latency-bar-row.total .latency-bar-label,
     .latency-bar-row.total .latency-bar-value { color: #fff; }
 
-    /* Citations */
-    .citation-row { padding: 0.6rem 0; border-bottom: 1px solid rgba(255,255,255,0.05); }
-    .citation-row:last-child { border-bottom: none; }
-    .citation-header { display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.35rem; }
-    .citation-index { font-size: 0.75rem; font-weight: 600; color: var(--text-muted); white-space: nowrap; }
+    /* Citations -- a responsive tile grid rather than a single-file list,
+       so the citations card actually uses the width it's given. */
+    #citations, .compare-column .citations {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 0.75rem;
+    }
+    .citation-row {
+      padding: 0.85rem 1rem;
+      border: 1px solid var(--glass-border);
+      border-radius: 12px;
+      background: rgba(255, 255, 255, 0.02);
+    }
+    .citation-header { display: flex; align-items: center; gap: 0.65rem; margin-bottom: 0.4rem; }
+    .citation-index { font-size: 0.72rem; font-weight: 600; color: var(--text-muted); white-space: nowrap; text-transform: uppercase; letter-spacing: 0.04em; }
     .citation-relevance-track { flex: 1; }
-    .citation-text { margin: 0; font-size: 0.85rem; color: var(--text-muted); line-height: 1.5; }
+    .citation-text { margin: 0; font-size: 0.82rem; color: var(--text-muted); line-height: 1.5; }
     .citations-empty { margin: 0; font-size: 0.85rem; color: var(--text-muted); font-style: italic; }
 
     /* STATE MACHINE STYLES */
@@ -289,22 +331,32 @@
       color: var(--accent);
     }
     body.state-processing .mic-status-text { opacity: 1; }
-    body.state-processing .output-container { display: flex; opacity: 0.5; }
-    body.state-processing #transcript, body.state-processing #answer, body.state-processing #latency { opacity: 0; }
+    body.state-processing .output-container { opacity: 0.5; }
+    body.state-processing .result-answer-card,
+    body.state-processing .result-latency-card,
+    body.state-processing .result-citations-card,
+    body.state-processing .compare-column { opacity: 0; }
 
-    /* State: done */
+    /* State: done -- each card/column reveals with its own delay, so the
+       whole dashboard cascades in as one orchestrated sequence instead of
+       everything popping in at once. */
     body.state-done .output-container {
-      display: flex;
       opacity: 1;
       transform: translateY(0);
     }
-    body.state-done #answer { animation: reveal 0.6s ease forwards; }
-    body.state-done #transcript { animation: reveal 0.4s ease forwards; }
-    body.state-done #latency { animation: reveal 0.8s ease forwards; }
-    
+    body.state-done .result-answer-card,
+    body.state-done .result-latency-card,
+    body.state-done .result-citations-card,
+    body.state-done .compare-column {
+      animation: reveal 0.6s cubic-bezier(0.16, 1, 0.3, 1) both;
+    }
+    body.state-done .result-latency-card { animation-delay: 0.08s; }
+    body.state-done .result-citations-card { animation-delay: 0.16s; }
+    body.state-done #compareCol_semantic { animation-delay: 0.1s; }
+
     /* State: error */
     body.state-error .mic-button { border-color: var(--red); color: var(--red); }
-    body.state-error .output-container { display: flex; opacity: 1; transform: translateY(0); }
+    body.state-error .output-container { opacity: 1; transform: translateY(0); }
 
     /* Animations */
     @keyframes pulse-soft {
@@ -345,25 +397,23 @@
         <path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/>
       </svg>
     </button>
+
+    <div class="mic-hint">or hold <kbd>Space</kbd></div>
   </div>
 
   <div class="output-container" id="outputContainer">
-    <div class="card">
-      <h3>Transcript</h3>
-      <p id="transcript"></p>
-    </div>
-    
-    <div class="card">
+    <div class="card result-answer-card">
+      <p id="transcript" class="result-transcript"></p>
       <h3>Answer</h3>
       <p id="answer"></p>
     </div>
-    
-    <div class="card">
+
+    <div class="card result-latency-card">
       <h3>Latency</h3>
       <div id="latency"></div>
     </div>
 
-    <div class="card">
+    <div class="card result-citations-card">
       <h3>Citations</h3>
       <div id="citations"></div>
     </div>
@@ -371,8 +421,7 @@
 
   <div class="output-container" id="compareContainer">
     <div class="card">
-      <h3>Transcript</h3>
-      <p id="compareTranscript"></p>
+      <p id="compareTranscript" class="result-transcript"></p>
       <p id="compareRefusal" class="refusal" style="display: none;"></p>
     </div>
 
