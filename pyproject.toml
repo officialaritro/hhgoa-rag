@@ -14,6 +14,7 @@ dependencies = [
     "huggingface_hub",
     "anthropic",
     "elevenlabs",
+    "torch",
 ]
 
 # torch resolves from PyTorch's CPU-only index. The default PyPI wheel pulls
