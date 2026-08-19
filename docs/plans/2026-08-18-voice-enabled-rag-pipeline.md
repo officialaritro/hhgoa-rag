@@ -75,6 +75,15 @@ Two consequences: generation floors around **650 ms to first token**, 3× the wh
 
 **Speech-to-text (measured end to end, real audio through `app/stt.py`):** **~1.1–1.3 s per query**, not the ~350 ms suggested by raw API TTFB. The difference is the WebSocket handshake, audio upload, and the commit round-trip — all of which the raw TTFB probe excluded. Five real clips transcribed verbatim and correctly. This is the single largest stage in the pipeline; a client-side socket opened before the user speaks is the only structural way to reduce it.
 
+**Guardrail thresholds — measured against the built indices, 2026-08-19:**
+
+| Signal | In-corpus / grounded | Off-topic / ungrounded | Threshold set |
+|---|---|---|---|
+| Top retrieval similarity | 0.773 – 0.842 | 0.499 – 0.649 | **0.70** |
+| Answer vs retrieved context | 0.756 – 0.902 | below 0.11 | **0.40** |
+
+The original 0.3 off-topic threshold sat below the *lowest* off-topic score observed (0.386), so that guard never fired at all. `scripts/tune_thresholds.py` recommends a much lower groundedness value (~0.02) because it scores the dataset's terse `Eng_Answer` rather than real model output; generated answers quote the retrieved passages and score far higher, so the measured pipeline overrides that proxy. All three E2E scenarios verified live against these values: in-corpus answered, off-topic refused as `off-topic`, unsafe refused as `unsafe input`.
+
 **Embedding:** `all-MiniLM-L6-v2` at **11.8 ms/query** (p50 11.8, max 13.3). Import + model load is ~17.5 s — startup cost, not per-query; the systemd unit allows `TimeoutStartSec=300`.
 
 **HuggingFace throughput:** **74 MB/s from the instance** versus 4.8 MB/s from a residential laptop — 15× faster. Ingestion and index building therefore run *on the instance*; nothing GB-scale is uploaded. Measured: `scripts/ingest_dataset.py` completed 10,000 rows in **35 s including the 3.7 GB download**, peak RSS **3.82 GB**.
