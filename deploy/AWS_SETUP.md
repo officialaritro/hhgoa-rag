@@ -81,7 +81,7 @@ Applied 2026-08-19. Steps 1–5 are **done and verified**; steps 6–7 remain an
 | 4 | DuckDNS `ragingoa.duckdns.org` → `13.234.228.244` | **Done** |
 | 5 | Open ports 80 and 443 | **Done** |
 | 6 | Install Caddy, issue Let's Encrypt certificate | **Done** — valid to 16 Nov 2026 |
-| 7 | Revoke public port 8000 | Pending — must be last, after the app serves over 443 |
+| 7 | Revoke public port 8000 | **Done** — verified unreachable; only 22/80/443 remain |
 
 Verified final state: `i-09e157bfae9bb82a6`, `ap-south-1b`, `m7i-flex.large`, Xeon Platinum 8488C (Sapphire Rapids), 2 vCPU, 7778 MiB RAM, 19 G filesystem with 15 G free, 2 G swap active and persisted in `/etc/fstab`, Elastic IP `13.234.228.244` still associated.
 
@@ -129,7 +129,7 @@ the browser-precondition check still works when the backend is down.
 
 The app binds `127.0.0.1:8000` and is reached only through Caddy.
 
-### Remaining: step 7 — revoke public port 8000, last
+### Step 7 — public port 8000 revoked (done)
 
 **Only after step 6 is confirmed working.** Port 8000 is currently the only route to the app; revoking it before Caddy serves 443 leaves no working path in.
 

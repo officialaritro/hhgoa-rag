@@ -20,8 +20,8 @@ Two documents cover deployment, in order:
 | App dir | `/opt/hhgoa-rag` |
 | Service | `voice-rag.service` → `uv run uvicorn app.main:app --host 127.0.0.1 --port 8000` |
 
-Ports 80/443 are public. The app binds **loopback only** — Caddy terminates TLS and proxies
-to it. Port 8000 is still open in the security group and gets revoked at go-live.
+Ports 80/443 are public; SSH on 22 is restricted. The app binds **loopback only** — Caddy
+terminates TLS and proxies to it. **Public port 8000 has been revoked** (verified unreachable).
 
 ## First-time provisioning
 
@@ -92,16 +92,13 @@ microphone permission. **Open it on whatever machine you demo from, before demo 
 
 ## Go-live checklist
 
-- [ ] `curl -sS https://ragingoa.duckdns.org/health` returns 200
-- [ ] Preflight all-green and mic prompt grants on the demo machine
-- [ ] TS-001 passes against the live URL with a real spoken question
-- [ ] Revoke public port 8000 — **last**, only once 443 is serving:
-      ```bash
-      aws ec2 revoke-security-group-ingress --group-id sg-01967e366d79ce0c8 \
-        --region ap-south-1 --protocol tcp --port 8000 --cidr 0.0.0.0/0
-      ```
-- [ ] `curl --max-time 5 http://13.234.228.244:8000/health` now times out
-- [ ] Benchmark re-run against the live HTTPS URL, report saved
+- [x] `curl -sS https://ragingoa.duckdns.org/health` returns 200
+- [x] Preflight all-green and mic prompt granted on the demo machine
+- [x] TS-001 / TS-002 / TS-003 pass against the live URL (answer, off-topic refusal, unsafe refusal)
+- [x] Public port 8000 revoked; `curl --max-time 6 http://13.234.228.244:8000/health` times out
+- [x] Benchmark run against the live HTTPS URL — see [docs/LATENCY_REPORT.md](../docs/LATENCY_REPORT.md)
+- [ ] Record the demo video
+- [ ] Submit: repo link, live link, both videos
 
 ## Troubleshooting
 

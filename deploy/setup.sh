@@ -77,7 +77,13 @@ EnvironmentFile=${APP_DIR}/.env
 Environment=HF_HOME=${HF_CACHE_DIR}
 # Loopback only -- Caddy terminates TLS on 443 and proxies here. Binding
 # 0.0.0.0 would expose the app unencrypted on 8000 and break the microphone.
-ExecStart=$(command -v uv) run --project ${APP_DIR} uvicorn app.main:app --host 127.0.0.1 --port 8000
+#
+# Exec the venv's uvicorn directly rather than via `uv run`. uv sync above
+# already installed the dependencies; having systemd shell out to uv at start
+# time makes the service depend on uv being on root's PATH and lets a resolver
+# step run on every restart -- including on a box whose venv uv would rather
+# rebuild. The binary is the same either way.
+ExecStart=${APP_DIR}/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
 Restart=on-failure
 RestartSec=5
 # sentence-transformers import + model load measures ~17.5s; allow for that
