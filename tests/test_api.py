@@ -266,3 +266,178 @@ def test_refusal_still_echoes_the_transcript_and_stages(mock_transcribe, mock_un
     assert body["transcript"] == "how to build a bomb"
     assert body["answer"] is None
     assert "stt" in body["stages_ms"]
+
+
+@patch("app.main.check_groundedness")
+@patch("app.main.check_off_topic")
+@patch("app.main.check_unsafe_input")
+@patch("app.main.generate_answer")
+@patch("app.main.retrieve")
+@patch("app.main.transcribe")
+def test_ask_returns_the_retrieved_passages_alongside_the_answer(
+    mock_transcribe,
+    mock_retrieve,
+    mock_generate,
+    mock_unsafe,
+    mock_offtopic,
+    mock_grounded,
+):
+    """Citations need the exact passages that grounded the answer, not just
+    the top score -- otherwise a judge has no way to see what the model
+    actually read."""
+    mock_transcribe.return_value = StageResult(
+        ok=True, value=STTOutput(transcript="what is x")
+    )
+    mock_unsafe.return_value.passed = True
+    mock_retrieve.return_value = _ok_retrieval()
+    mock_offtopic.return_value.passed = True
+    mock_generate.return_value = StageResult(
+        ok=True, value=GenerationOutput(answer="x is y")
+    )
+    mock_grounded.return_value.passed = True
+
+    body = client.post("/api/ask", content=b"audio").json()
+
+    assert body["passages"] == [
+        {
+            "text": "x is y",
+            "source_passage": "x is y",
+            "is_selected": True,
+            "score": 0.9,
+        }
+    ]
+
+
+@patch("app.main.check_unsafe_input")
+@patch("app.main.transcribe")
+def test_ask_refusal_before_retrieval_returns_empty_passages(
+    mock_transcribe, mock_unsafe
+):
+    """A refusal that happens before retrieval ever runs has nothing to cite."""
+    mock_transcribe.return_value = StageResult(
+        ok=True, value=STTOutput(transcript="how to build a bomb")
+    )
+    mock_unsafe.return_value.passed = False
+    mock_unsafe.return_value.reason = "unsafe input"
+
+    body = client.post("/api/ask", content=b"audio").json()
+
+    assert body["passages"] == []
+
+
+@patch("app.main.check_groundedness")
+@patch("app.main.check_off_topic")
+@patch("app.main.check_unsafe_input")
+@patch("app.main.generate_answer")
+@patch("app.main.retrieve")
+@patch("app.main.transcribe")
+def test_compare_answers_both_strategies_from_one_transcription(
+    mock_transcribe,
+    mock_retrieve,
+    mock_generate,
+    mock_unsafe,
+    mock_offtopic,
+    mock_grounded,
+):
+    """One recording must be transcribed once and compared on identical text
+    -- calling /api/ask twice would transcribe the same audio twice and could
+    return two different transcripts for what is supposed to be one question."""
+    mock_transcribe.return_value = StageResult(
+        ok=True, value=STTOutput(transcript="what is x")
+    )
+    mock_unsafe.return_value.passed = True
+    mock_retrieve.return_value = _ok_retrieval()
+    mock_offtopic.return_value.passed = True
+    mock_generate.return_value = StageResult(
+        ok=True, value=GenerationOutput(answer="x is y")
+    )
+    mock_grounded.return_value.passed = True
+
+    response = client.post("/api/compare", content=b"audio")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["transcript"] == "what is x"
+    assert mock_transcribe.call_count == 1
+    assert set(body["results"]) == {"fixed_size", "semantic"}
+    for result in body["results"].values():
+        assert result["answer"] == "x is y"
+        assert result["passages"] == [
+            {
+                "text": "x is y",
+                "source_passage": "x is y",
+                "is_selected": True,
+                "score": 0.9,
+            }
+        ]
+    assert mock_retrieve.call_count == 2
+    called_strategies = {c.kwargs["strategy"] for c in mock_retrieve.call_args_list}
+    assert called_strategies == {"fixed_size", "semantic"}
+    assert all(c.kwargs["query"] == "what is x" for c in mock_retrieve.call_args_list)
+
+
+@patch("app.main.check_unsafe_input")
+@patch("app.main.transcribe")
+def test_compare_refuses_unsafe_input_before_any_retrieval(
+    mock_transcribe, mock_unsafe
+):
+    mock_transcribe.return_value = StageResult(
+        ok=True, value=STTOutput(transcript="how to build a bomb")
+    )
+    mock_unsafe.return_value.passed = False
+    mock_unsafe.return_value.reason = "unsafe input"
+
+    with (
+        patch("app.main.retrieve") as mock_retrieve,
+        patch("app.main.generate_answer") as mock_generate,
+    ):
+        response = client.post("/api/compare", content=b"audio")
+        mock_retrieve.assert_not_called()
+        mock_generate.assert_not_called()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["refusal_reason"] == "unsafe input"
+    assert body["results"] is None
+
+
+@patch("app.main.check_groundedness")
+@patch("app.main.check_off_topic")
+@patch("app.main.check_unsafe_input")
+@patch("app.main.generate_answer")
+@patch("app.main.retrieve")
+@patch("app.main.transcribe")
+def test_compare_isolates_a_failing_strategy_branch(
+    mock_transcribe,
+    mock_retrieve,
+    mock_generate,
+    mock_unsafe,
+    mock_offtopic,
+    mock_grounded,
+):
+    """One strategy's pipeline blowing up must not 500 the whole request or
+    swallow the sibling strategy's real, successful result."""
+    mock_transcribe.return_value = StageResult(
+        ok=True, value=STTOutput(transcript="what is x")
+    )
+    mock_unsafe.return_value.passed = True
+
+    def retrieve_side_effect(*, query, strategy, **kwargs):
+        if strategy == "semantic":
+            raise RuntimeError("boom")
+        return _ok_retrieval()
+
+    mock_retrieve.side_effect = retrieve_side_effect
+    mock_offtopic.return_value.passed = True
+    mock_generate.return_value = StageResult(
+        ok=True, value=GenerationOutput(answer="x is y")
+    )
+    mock_grounded.return_value.passed = True
+
+    response = client.post("/api/compare", content=b"audio")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["results"]["fixed_size"]["answer"] == "x is y"
+    assert body["results"]["semantic"]["answer"] is None
+    assert body["results"]["semantic"]["refusal_reason"] == "internal error"

@@ -7,6 +7,7 @@ let capturedChunks = [];
 let recording = false;
 let selectedStrategy = "fixed_size";
 let animationId;
+let compareMode = false;
 
 const $ = (id) => document.getElementById(id);
 
@@ -154,19 +155,67 @@ const STAGE_LABELS = {
   guardrail_groundedness: "Guardrail · groundedness",
 };
 
-function renderLatency(data) {
-  const stages = data.stages_ms || {};
-  const rows = Object.entries(stages)
-    .map(
-      ([key, ms]) =>
-        `<tr><td>${STAGE_LABELS[key] || key}</td><td class="n">${ms.toFixed(1)} ms</td></tr>`,
-    )
+function buildLatencyChartHtml(stagesMs, totalMs) {
+  const entries = Object.entries(stagesMs || {});
+  if (!entries.length && totalMs == null) return "";
+
+  const rows = entries
+    .map(([key, ms]) => {
+      // A 2%-minimum bar keeps a 0.0ms guardrail stage visible instead of a
+      // zero-width sliver -- the exact ms label next to it is what keeps that
+      // sliver from being mistaken for a larger real stage.
+      const width = totalMs > 0 ? Math.max(2, (ms / totalMs) * 100) : 2;
+      return `
+        <div class="latency-bar-row">
+          <span class="latency-bar-label">${STAGE_LABELS[key] || key}</span>
+          <div class="latency-bar-track">
+            <div class="latency-bar-fill" style="width: ${width}%"></div>
+          </div>
+          <span class="latency-bar-value">${ms.toFixed(1)} ms</span>
+        </div>`;
+    })
     .join("");
   const total =
-    data.latency_ms != null
-      ? `<tr class="total"><td>Total</td><td class="n">${data.latency_ms.toFixed(1)} ms</td></tr>`
+    totalMs != null
+      ? `<div class="latency-bar-row total"><span class="latency-bar-label">Total</span><span class="latency-bar-value">${totalMs.toFixed(1)} ms</span></div>`
       : "";
-  $("latency").innerHTML = rows || total ? `<table>${rows}${total}</table>` : "";
+  return rows || total ? `${rows}${total}` : "";
+}
+
+function renderLatency(data) {
+  $("latency").innerHTML = buildLatencyChartHtml(data.stages_ms || {}, data.latency_ms);
+}
+
+function escapeHtml(text) {
+  const div = document.createElement("div");
+  div.textContent = text;
+  return div.innerHTML;
+}
+
+function buildCitationsHtml(passages) {
+  if (!passages || !passages.length) {
+    return '<p class="citations-empty">No passages retrieved.</p>';
+  }
+  return passages
+    .map((p, i) => {
+      const truncated = p.text.length > 220 ? `${p.text.slice(0, 220)}...` : p.text;
+      const relevance = Math.min(100, Math.max(0, p.score * 100));
+      return `
+        <div class="citation-row" title="${escapeHtml(p.text)}">
+          <div class="citation-header">
+            <span class="citation-index">Passage ${i + 1}</span>
+            <div class="latency-bar-track citation-relevance-track">
+              <div class="latency-bar-fill" style="width: ${relevance}%"></div>
+            </div>
+          </div>
+          <p class="citation-text">${escapeHtml(truncated)}</p>
+        </div>`;
+    })
+    .join("");
+}
+
+function renderCitations(passages, containerEl) {
+  containerEl.innerHTML = buildCitationsHtml(passages);
 }
 
 function displayResult(data) {
@@ -181,6 +230,42 @@ function displayResult(data) {
     answerEl.className = "refusal";
   }
   renderLatency(data);
+  renderCitations(data.passages, $("citations"));
+  $("outputContainer").style.display = "flex";
+  $("compareContainer").style.display = "none";
+}
+
+function displayCompareResult(data) {
+  $("compareTranscript").textContent = data.transcript ? `"${data.transcript}"` : "";
+  const refusalEl = $("compareRefusal");
+  const grid = document.querySelector("#compareContainer .compare-grid");
+
+  if (data.results == null) {
+    refusalEl.textContent = `Cannot answer — ${data.refusal_reason}`;
+    refusalEl.style.display = "block";
+    grid.style.display = "none";
+  } else {
+    refusalEl.style.display = "none";
+    grid.style.display = "";
+    for (const strategy of ["fixed_size", "semantic"]) {
+      const result = data.results[strategy];
+      const col = $(`compareCol_${strategy}`);
+      const answerEl = col.querySelector(".answer");
+      if (result.answer) {
+        answerEl.innerHTML = parseMarkdown(result.answer);
+        answerEl.className = "answer";
+      } else {
+        const score = result.top_score != null ? ` (top match ${result.top_score.toFixed(3)})` : "";
+        answerEl.textContent = `Cannot answer — ${result.refusal_reason}${score}`;
+        answerEl.className = "answer refusal";
+      }
+      const totalMs = Object.values(result.stages_ms || {}).reduce((a, b) => a + b, 0);
+      col.querySelector(".latency").innerHTML = buildLatencyChartHtml(result.stages_ms, totalMs);
+      col.querySelector(".citations").innerHTML = buildCitationsHtml(result.passages);
+    }
+  }
+  $("outputContainer").style.display = "none";
+  $("compareContainer").style.display = "flex";
 }
 
 async function stopRecording() {
@@ -192,7 +277,7 @@ async function stopRecording() {
   recording = false;
   setState("processing");
   if (animationId) cancelAnimationFrame(animationId);
-  
+
   processorNode.disconnect();
   analyserNode.disconnect();
   sourceNode.disconnect();
@@ -200,20 +285,36 @@ async function stopRecording() {
   $("statusText").textContent = "Processing...";
 
   const audioBytes = concatenateChunks(capturedChunks);
+  const endpoint = compareMode
+    ? "/api/compare"
+    : `/api/ask?strategy=${encodeURIComponent(selectedStrategy)}`;
   try {
-    const response = await fetch(
-      `/api/ask?strategy=${encodeURIComponent(selectedStrategy)}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/octet-stream" },
-        body: audioBytes,
-      },
-    );
-    displayResult(await response.json());
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/octet-stream" },
+      body: audioBytes,
+    });
+    const data = await response.json();
+    if (compareMode) {
+      displayCompareResult(data);
+    } else {
+      displayResult(data);
+    }
     setState("done");
   } catch (err) {
-    $("answer").textContent = `Request failed: ${err.message}`;
-    $("answer").className = "refusal";
+    if (compareMode) {
+      $("compareTranscript").textContent = "";
+      $("compareRefusal").textContent = `Request failed: ${err.message}`;
+      $("compareRefusal").style.display = "block";
+      document.querySelector("#compareContainer .compare-grid").style.display = "none";
+      $("outputContainer").style.display = "none";
+      $("compareContainer").style.display = "flex";
+    } else {
+      $("answer").textContent = `Request failed: ${err.message}`;
+      $("answer").className = "refusal";
+      $("outputContainer").style.display = "flex";
+      $("compareContainer").style.display = "none";
+    }
     setState("error");
   }
 }
@@ -263,5 +364,11 @@ if (!micAvailable()) {
   recordButton.addEventListener("pointerup", stopRecording);
   recordButton.addEventListener("pointercancel", stopRecording);
 }
+
+$("compareToggle").addEventListener("change", (e) => {
+  compareMode = e.target.checked;
+  $("strategyChoices").style.opacity = compareMode ? "0.4" : "1";
+  $("strategyChoices").style.pointerEvents = compareMode ? "none" : "";
+});
 
 loadStrategies();

@@ -46,9 +46,12 @@
       padding: 2rem 1.5rem;
       display: flex;
       justify-content: center;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 1rem;
       z-index: 10;
     }
-    
+
     .strategy-group {
       display: flex;
       background: var(--glass);
@@ -58,8 +61,9 @@
       gap: 4px;
       backdrop-filter: blur(10px);
       -webkit-backdrop-filter: blur(10px);
+      transition: opacity 0.2s ease;
     }
-    
+
     .strategy-group label {
       padding: 6px 16px;
       border-radius: 999px;
@@ -69,12 +73,39 @@
       cursor: pointer;
       transition: all 0.2s ease;
     }
-    
+
     .strategy-group input { display: none; }
     .strategy-group input:checked + label {
       background: rgba(255, 255, 255, 0.1);
       color: #fff;
     }
+
+    /* Compare toggle */
+    .compare-toggle {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      font-size: 0.85rem;
+      font-weight: 500;
+      color: var(--text-muted);
+      cursor: pointer;
+      user-select: none;
+    }
+    .compare-toggle input { accent-color: var(--accent); width: 16px; height: 16px; cursor: pointer; }
+    .compare-toggle:has(input:checked) { color: #fff; }
+
+    /* Compare grid */
+    .compare-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1rem;
+    }
+    @media (max-width: 640px) {
+      .compare-grid { grid-template-columns: 1fr; }
+    }
+    .compare-column h3 { margin-bottom: 0.75rem; }
+    .compare-column .answer { font-size: 1rem; color: #fff; margin: 0 0 1rem 0; line-height: 1.5; }
+    .compare-column .answer.refusal { color: var(--red) !important; font-weight: 500; }
 
     /* Central Mic UI */
     .mic-container {
@@ -198,11 +229,38 @@
     #answer strong { color: var(--accent); font-weight: 600; }
     .refusal { color: var(--red) !important; font-weight: 500; }
     
-    /* Latency table */
-    table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; font-size: 0.85rem; }
-    td { padding: 0.4rem 0; border-bottom: 1px solid rgba(255,255,255,0.05); color: var(--text-muted); }
-    td.n { text-align: right; color: var(--text); }
-    .total td { border-bottom: none; border-top: 1px solid var(--glass-border); font-weight: 600; color: #fff; padding-top: 0.8rem; margin-top: 0.4rem; }
+    /* Latency bar chart */
+    .latency-bar-row {
+      display: grid;
+      grid-template-columns: 11.5rem 1fr 4.5rem;
+      align-items: center;
+      gap: 0.6rem;
+      padding: 0.35rem 0;
+      font-variant-numeric: tabular-nums;
+      font-size: 0.78rem;
+    }
+    .latency-bar-label { color: var(--text-muted); line-height: 1.25; }
+    .latency-bar-track { height: 6px; border-radius: 999px; background: var(--glass); border: 1px solid var(--glass-border); overflow: hidden; }
+    .latency-bar-fill { height: 100%; border-radius: 999px; background: var(--accent); transition: width 0.4s ease; }
+    .latency-bar-value { text-align: right; color: var(--text); }
+    .latency-bar-row.total {
+      grid-template-columns: 11.5rem 4.5rem;
+      margin-top: 0.4rem;
+      padding-top: 0.8rem;
+      border-top: 1px solid var(--glass-border);
+      font-weight: 600;
+    }
+    .latency-bar-row.total .latency-bar-label,
+    .latency-bar-row.total .latency-bar-value { color: #fff; }
+
+    /* Citations */
+    .citation-row { padding: 0.6rem 0; border-bottom: 1px solid rgba(255,255,255,0.05); }
+    .citation-row:last-child { border-bottom: none; }
+    .citation-header { display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.35rem; }
+    .citation-index { font-size: 0.75rem; font-weight: 600; color: var(--text-muted); white-space: nowrap; }
+    .citation-relevance-track { flex: 1; }
+    .citation-text { margin: 0; font-size: 0.85rem; color: var(--text-muted); line-height: 1.5; }
+    .citations-empty { margin: 0; font-size: 0.85rem; color: var(--text-muted); font-style: italic; }
 
     /* STATE MACHINE STYLES */
     
@@ -271,6 +329,10 @@
     <div class="strategy-group" id="strategyChoices">
       <span style="font-size: 0.8rem; padding: 6px 16px; color: var(--text-muted);">Loading...</span>
     </div>
+    <label class="compare-toggle">
+      <input type="checkbox" id="compareToggle">
+      <span>Compare strategies</span>
+    </label>
   </div>
 
   <div class="mic-container">
@@ -299,6 +361,34 @@
     <div class="card">
       <h3>Latency</h3>
       <div id="latency"></div>
+    </div>
+
+    <div class="card">
+      <h3>Citations</h3>
+      <div id="citations"></div>
+    </div>
+  </div>
+
+  <div class="output-container" id="compareContainer">
+    <div class="card">
+      <h3>Transcript</h3>
+      <p id="compareTranscript"></p>
+      <p id="compareRefusal" class="refusal" style="display: none;"></p>
+    </div>
+
+    <div class="compare-grid">
+      <div class="card compare-column" id="compareCol_fixed_size">
+        <h3>fixed-size</h3>
+        <p class="answer"></p>
+        <div class="latency"></div>
+        <div class="citations"></div>
+      </div>
+      <div class="card compare-column" id="compareCol_semantic">
+        <h3>semantic</h3>
+        <p class="answer"></p>
+        <div class="latency"></div>
+        <div class="citations"></div>
+      </div>
     </div>
   </div>
 

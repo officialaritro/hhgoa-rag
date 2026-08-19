@@ -5,6 +5,7 @@ Run: uvicorn app.main:app --host 0.0.0.0 --port 8000
 (see docs/plans/2026-08-18-voice-enabled-rag-pipeline.md -> Runtime Environment)
 """
 
+import asyncio
 import logging
 import time
 from collections.abc import AsyncIterator
@@ -82,6 +83,10 @@ def _refusal(
     # a miscalibrated threshold and a genuinely off-topic question produce the
     # identical response. That is exactly how a threshold refusing 38.5% of
     # real in-corpus questions reached the live service unnoticed.
+    #
+    # passages is always [] here: _refusal() is only used for the stt/unsafe
+    # refusals that happen before retrieve() ever runs, so there is nothing to
+    # cite yet.
     return {
         "transcript": transcript,
         "answer": None,
@@ -90,6 +95,74 @@ def _refusal(
         "stages_ms": stages,
         "strategy": strategy,
         "top_score": top_score,
+        "passages": [],
+    }
+
+
+async def _run_strategy_pipeline(transcript: str, strategy: str) -> dict[str, Any]:
+    """Retrieval -> off-topic guard -> generation -> groundedness guard for one
+    strategy, given an already-transcribed, already-safety-checked query.
+
+    Returns the per-strategy result shape shared by /api/ask (merged with its
+    own stt/guardrail_unsafe stages) and /api/compare (merged per strategy
+    into a `results` object) -- both endpoints need the identical shape, so
+    it lives here once rather than being built twice.
+    """
+    stages: dict[str, float] = {}
+
+    mark = time.perf_counter()
+    retrieval = await run_in_threadpool(retrieve, query=transcript, strategy=strategy)
+    stages["retrieval"] = _elapsed_ms(mark)
+    passages = [p.model_dump() for p in retrieval.passages]
+
+    mark = time.perf_counter()
+    top_score = retrieval.passages[0].score if retrieval.passages else 0.0
+    off_topic = check_off_topic(top_similarity_score=top_score, strategy=strategy)
+    stages["guardrail_off_topic"] = _elapsed_ms(mark)
+    if not off_topic.passed:
+        return {
+            "answer": None,
+            "refusal_reason": off_topic.reason,
+            "stages_ms": stages,
+            "top_score": top_score,
+            "passages": passages,
+        }
+
+    mark = time.perf_counter()
+    generation_result = await run_in_threadpool(
+        generate_answer, query=transcript, retrieval=retrieval
+    )
+    stages["generation"] = _elapsed_ms(mark)
+    if not generation_result.ok:
+        return {
+            "answer": None,
+            "refusal_reason": "could not generate an answer",
+            "stages_ms": stages,
+            "top_score": top_score,
+            "passages": passages,
+        }
+
+    answer = generation_result.value.answer
+    mark = time.perf_counter()
+    grounded = await run_in_threadpool(
+        check_groundedness, answer=answer, retrieval=retrieval
+    )
+    stages["guardrail_groundedness"] = _elapsed_ms(mark)
+    if not grounded.passed:
+        return {
+            "answer": None,
+            "refusal_reason": grounded.reason,
+            "stages_ms": stages,
+            "top_score": top_score,
+            "passages": passages,
+        }
+
+    return {
+        "answer": answer,
+        "refusal_reason": None,
+        "stages_ms": stages,
+        "top_score": top_score,
+        "passages": passages,
     }
 
 
@@ -146,69 +219,105 @@ async def ask(
             _refusal(unsafe.reason, _elapsed_ms(start), stages, strategy, transcript)
         )
 
-    mark = time.perf_counter()
-    retrieval = await run_in_threadpool(retrieve, query=transcript, strategy=strategy)
-    stages["retrieval"] = _elapsed_ms(mark)
-
-    mark = time.perf_counter()
-    top_score = retrieval.passages[0].score if retrieval.passages else 0.0
-    off_topic = check_off_topic(top_similarity_score=top_score, strategy=strategy)
-    stages["guardrail_off_topic"] = _elapsed_ms(mark)
-    if not off_topic.passed:
-        return JSONResponse(
-            _refusal(
-                off_topic.reason,
-                _elapsed_ms(start),
-                stages,
-                strategy,
-                transcript,
-                top_score,
-            )
-        )
-
-    mark = time.perf_counter()
-    generation_result = await run_in_threadpool(
-        generate_answer, query=transcript, retrieval=retrieval
-    )
-    stages["generation"] = _elapsed_ms(mark)
-    if not generation_result.ok:
-        return JSONResponse(
-            _refusal(
-                "could not generate an answer",
-                _elapsed_ms(start),
-                stages,
-                strategy,
-                transcript,
-            )
-        )
-
-    answer = generation_result.value.answer
-    mark = time.perf_counter()
-    grounded = await run_in_threadpool(
-        check_groundedness, answer=answer, retrieval=retrieval
-    )
-    stages["guardrail_groundedness"] = _elapsed_ms(mark)
-    if not grounded.passed:
-        return JSONResponse(
-            _refusal(
-                grounded.reason,
-                _elapsed_ms(start),
-                stages,
-                strategy,
-                transcript,
-                top_score,
-            )
-        )
+    result = await _run_strategy_pipeline(transcript, strategy)
+    stages.update(result["stages_ms"])
 
     return JSONResponse(
         {
             "transcript": transcript,
-            "answer": answer,
-            "refusal_reason": None,
+            "answer": result["answer"],
+            "refusal_reason": result["refusal_reason"],
             "latency_ms": _elapsed_ms(start),
             "stages_ms": stages,
             "strategy": strategy,
-            "top_score": top_score,
+            "top_score": result["top_score"],
+            "passages": result["passages"],
+        }
+    )
+
+
+async def _run_strategy_pipeline_safe(transcript: str, strategy: str) -> dict[str, Any]:
+    """Wraps `_run_strategy_pipeline` so one strategy's unexpected failure
+    inside the `/api/compare` fan-out reports a refusal for that strategy
+    only, instead of raising out of `asyncio.gather` and 500ing the whole
+    request -- which would also discard the sibling strategy's real result.
+    """
+    try:
+        return await _run_strategy_pipeline(transcript, strategy)
+    except Exception:
+        logger.exception("compare: strategy %r raised", strategy)
+        return {
+            "answer": None,
+            "refusal_reason": "internal error",
+            "stages_ms": {},
+            "top_score": None,
+            "passages": [],
+        }
+
+
+@app.post("/api/compare")
+async def compare(request: Request) -> JSONResponse:
+    """Voice question in -> both chunking strategies answered from the same
+    transcription, concurrently. Exists so a side-by-side comparison never
+    has to transcribe the same audio twice (extra STT latency/cost, and a
+    real risk of two different transcripts for what's supposed to be one
+    question)."""
+    start = time.perf_counter()
+    shared_stages: dict[str, float] = {}
+
+    audio_bytes = await request.body()
+
+    mark = time.perf_counter()
+    stt_result = await run_in_threadpool(transcribe, audio_chunks=[audio_bytes])
+    shared_stages["stt"] = _elapsed_ms(mark)
+    if not stt_result.ok:
+        return JSONResponse(
+            {
+                "transcript": None,
+                "latency_ms": _elapsed_ms(start),
+                "shared_stages_ms": shared_stages,
+                "refusal_reason": "could not process audio",
+                "results": None,
+            }
+        )
+
+    transcript = stt_result.value.transcript
+    if not transcript.strip():
+        return JSONResponse(
+            {
+                "transcript": transcript,
+                "latency_ms": _elapsed_ms(start),
+                "shared_stages_ms": shared_stages,
+                "refusal_reason": "could not understand audio",
+                "results": None,
+            }
+        )
+
+    mark = time.perf_counter()
+    unsafe = check_unsafe_input(transcript)
+    shared_stages["guardrail_unsafe"] = _elapsed_ms(mark)
+    if not unsafe.passed:
+        return JSONResponse(
+            {
+                "transcript": transcript,
+                "latency_ms": _elapsed_ms(start),
+                "shared_stages_ms": shared_stages,
+                "refusal_reason": unsafe.reason,
+                "results": None,
+            }
+        )
+
+    strategy_results = await asyncio.gather(
+        *(_run_strategy_pipeline_safe(transcript, s) for s in _STRATEGIES)
+    )
+
+    return JSONResponse(
+        {
+            "transcript": transcript,
+            "latency_ms": _elapsed_ms(start),
+            "shared_stages_ms": shared_stages,
+            "refusal_reason": None,
+            "results": dict(zip(_STRATEGIES, strategy_results)),
         }
     )
 
