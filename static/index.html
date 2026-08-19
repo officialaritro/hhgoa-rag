@@ -260,11 +260,21 @@
     #answer {
       font-size: 1.3rem;
       color: #fff;
-      margin: 0;
       line-height: 1.65;
     }
 
-    #answer strong { color: var(--accent); font-weight: 600; }
+    #answer p, .compare-column .answer p { margin: 0 0 0.85rem 0; }
+    #answer p:last-child, .compare-column .answer p:last-child { margin-bottom: 0; }
+    #answer strong, .compare-column .answer strong { color: var(--accent); font-weight: 600; }
+    .answer-heading {
+      font-size: 1rem;
+      font-weight: 600;
+      color: #fff;
+      margin: 1.1rem 0 0.5rem 0;
+    }
+    .answer-heading:first-child { margin-top: 0; }
+    #answer ul, .compare-column .answer ul { margin: 0 0 0.85rem 1.25rem; padding: 0; }
+    #answer li, .compare-column .answer li { margin-bottom: 0.35rem; }
     .refusal { color: var(--red) !important; font-weight: 500; }
 
     /* Latency bar chart -- label+value on one line, track full-width below,
@@ -405,7 +415,7 @@
     <div class="card result-answer-card">
       <p id="transcript" class="result-transcript"></p>
       <h3>Answer</h3>
-      <p id="answer"></p>
+      <div id="answer"></div>
     </div>
 
     <div class="card result-latency-card">
@@ -428,13 +438,13 @@
     <div class="compare-grid">
       <div class="card compare-column" id="compareCol_fixed_size">
         <h3>fixed-size</h3>
-        <p class="answer"></p>
+        <div class="answer"></div>
         <div class="latency"></div>
         <div class="citations"></div>
       </div>
       <div class="card compare-column" id="compareCol_semantic">
         <h3>semantic</h3>
-        <p class="answer"></p>
+        <div class="answer"></div>
         <div class="latency"></div>
         <div class="citations"></div>
       </div>

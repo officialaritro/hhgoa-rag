@@ -16,8 +16,54 @@ function setState(state) {
 }
 
 function parseMarkdown(text) {
+  // Defense-in-depth: the generation prompt (app/generation.py) asks for
+  // plain spoken-style prose, but a model can still slip in a stray
+  // heading/bullet/asterisk -- render it properly instead of leaking literal
+  // `#`/`-`/`**` characters into the answer, and escape first since this
+  // text becomes innerHTML.
   if (!text) return "";
-  return text.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+  const lines = escapeHtml(text).split("\n");
+  const htmlParts = [];
+  let listItems = [];
+  let paragraphLines = [];
+
+  const flushList = () => {
+    if (!listItems.length) return;
+    htmlParts.push(`<ul>${listItems.map((item) => `<li>${item}</li>`).join("")}</ul>`);
+    listItems = [];
+  };
+  const flushParagraph = () => {
+    if (!paragraphLines.length) return;
+    htmlParts.push(`<p>${paragraphLines.join(" ")}</p>`);
+    paragraphLines = [];
+  };
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line) {
+      flushParagraph();
+      flushList();
+      continue;
+    }
+    const bolded = line.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+    const headingMatch = bolded.match(/^#{1,6}\s+(.*)/);
+    const bulletMatch = bolded.match(/^[-*]\s+(.*)/);
+
+    if (headingMatch) {
+      flushParagraph();
+      flushList();
+      htmlParts.push(`<h4 class="answer-heading">${headingMatch[1]}</h4>`);
+    } else if (bulletMatch) {
+      flushParagraph();
+      listItems.push(bulletMatch[1]);
+    } else {
+      flushList();
+      paragraphLines.push(bolded);
+    }
+  }
+  flushParagraph();
+  flushList();
+  return htmlParts.join("");
 }
 
 function micAvailable() {
