@@ -57,7 +57,6 @@ jobs:
           done
       - name: Shellcheck
         run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
           # SC2086 (word splitting) is pervasive and intentional in these
           # scripts; everything else is treated as a real finding.
           shellcheck --severity=warning --exclude=SC2086 deploy/*.sh
