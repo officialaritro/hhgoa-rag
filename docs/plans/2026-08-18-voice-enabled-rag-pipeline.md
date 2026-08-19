@@ -75,14 +75,24 @@ Two consequences: generation floors around **650 ms to first token**, 3× the wh
 
 **Speech-to-text (measured end to end, real audio through `app/stt.py`):** **~1.1–1.3 s per query**, not the ~350 ms suggested by raw API TTFB. The difference is the WebSocket handshake, audio upload, and the commit round-trip — all of which the raw TTFB probe excluded. Five real clips transcribed verbatim and correctly. This is the single largest stage in the pipeline; a client-side socket opened before the user speaks is the only structural way to reduce it.
 
-**Guardrail thresholds — measured against the built indices, 2026-08-19:**
+**Guardrail thresholds — measured against the built indices, 2026-08-19 (revised).**
 
-| Signal | In-corpus / grounded | Off-topic / ungrounded | Threshold set |
-|---|---|---|---|
-| Top retrieval similarity | 0.773 – 0.842 | 0.499 – 0.649 | **0.70** |
-| Answer vs retrieved context | 0.756 – 0.902 | below 0.11 | **0.40** |
+The off-topic gate is **per index**, because the two are on different score scales. Measured over 200 sampled corpus queries per index (top-1 retrieval similarity) against 7 off-topic probes:
 
-The original 0.3 off-topic threshold sat below the *lowest* off-topic score observed (0.386), so that guard never fired at all. `scripts/tune_thresholds.py` recommends a much lower groundedness value (~0.02) because it scores the dataset's terse `Eng_Answer` rather than real model output; generated answers quote the retrieved passages and score far higher, so the measured pipeline overrides that proxy. All three E2E scenarios verified live against these values: in-corpus answered, off-topic refused as `off-topic`, unsafe refused as `unsafe input`.
+| Index | In-corpus min / p05 / p50 | Highest off-topic probe | Threshold | False refusals |
+|---|---|---|---|---|
+| `fixed_size` (101k chunks) | 0.393 / 0.558 / 0.741 | 0.612 | **0.55** | 4.5% |
+| `semantic` (338k chunks) | 0.474 / 0.575 / 0.779 | 0.743 | **0.60** | 8.0% |
+
+Groundedness stays at **0.40**: real generated answers score 0.756–0.902 against their retrieved context and below 0.11 against unrelated context. `scripts/tune_thresholds.py` recommends ~0.02 there because it scores the dataset's terse `Eng_Answer` rather than model output, which quotes the passages and scores an order of magnitude higher.
+
+Three findings behind the revision, each of which had already reached the live service:
+
+1. **A single shared off-topic threshold is not calibratable.** Semantic chunks are shorter, so every cosine runs higher on that index — in-corpus median 0.779 vs 0.741, top off-topic probe 0.743 vs 0.612. The first attempt set **0.70** for both, verified it against the *semantic* index, and shipped it against the `fixed_size` default. On `fixed_size` that refused **38.5% of real in-corpus questions**, including one whose query is in the corpus verbatim (0.687 on `fixed_size`, 0.828 on `semantic`).
+2. **The distributions overlap, and one off-topic query is uncatchable by similarity.** "what is my bank account password" scores 0.612 / 0.743 because an MS MARCO web-search corpus genuinely contains bank-and-password passages — its *topic* is in-corpus even though its answer cannot be. Refusing it by raising the gate costs a quarter of all real questions. It is refused downstream instead, by the generation prompt ("say so if the passages do not answer") and the groundedness guard. TS-002 grades on questions *clearly unrelated* to the corpus; the thresholds above refuse every other clearly-unrelated probe.
+3. **Mean-of-top-5 is not a better signal.** Measured as an alternative: at matched leak rates it refused 2.0% vs 4.5% of real questions on `fixed_size` but ~10% vs 8.0% on `semantic`. No consistent gain, so top-1 stays.
+
+The earlier 0.3 default was genuinely broken too — below the *lowest* off-topic score observed (0.386), so that guard never fired at all. Both failures share one cause: the threshold was never checked against the in-corpus distribution's lower tail, only against a handful of hand-picked questions from its easy end. `tests/test_guardrail_calibration.py` now pins each default to a ≤10% false-refusal budget from the recorded distributions, so a threshold cannot be moved without the measurement moving with it.
 
 **Embedding:** `all-MiniLM-L6-v2` at **11.8 ms/query** (p50 11.8, max 13.3). Import + model load is ~17.5 s — startup cost, not per-query; the systemd unit allows `TimeoutStartSec=300`.
 

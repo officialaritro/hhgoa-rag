@@ -1,5 +1,7 @@
 from unittest.mock import patch
 
+import pytest
+
 from app.guardrails import check_groundedness, check_off_topic, check_unsafe_input
 from app.schemas import RetrievalOutput, RetrievedPassage
 
@@ -20,14 +22,18 @@ def _retrieval():
 
 
 def test_check_off_topic_flags_low_similarity_score():
-    result = check_off_topic(top_similarity_score=0.05, threshold=0.3)
+    result = check_off_topic(
+        top_similarity_score=0.05, strategy="fixed_size", threshold=0.3
+    )
 
     assert result.passed is False
     assert result.reason == "off-topic"
 
 
 def test_check_off_topic_passes_high_similarity_score():
-    result = check_off_topic(top_similarity_score=0.8, threshold=0.3)
+    result = check_off_topic(
+        top_similarity_score=0.8, strategy="fixed_size", threshold=0.3
+    )
 
     assert result.passed is True
     assert result.reason is None
@@ -97,3 +103,10 @@ def test_threshold_falls_back_when_unset_blank_or_unparseable(monkeypatch):
     assert _threshold("SOME_THRESHOLD", 0.3) == 0.3
     monkeypatch.setenv("SOME_THRESHOLD", "not-a-number")
     assert _threshold("SOME_THRESHOLD", 0.3) == 0.3
+
+
+def test_check_off_topic_rejects_a_strategy_with_no_measured_threshold():
+    """Silently borrowing another index's threshold is the bug this table
+    exists to prevent, so an unmeasured strategy must fail loudly."""
+    with pytest.raises(ValueError, match="no measured off-topic threshold"):
+        check_off_topic(top_similarity_score=0.8, strategy="hnsw_experimental")

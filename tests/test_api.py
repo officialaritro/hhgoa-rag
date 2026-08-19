@@ -96,6 +96,11 @@ def test_ask_refuses_off_topic_query_before_generation_runs(
     assert response.status_code == 200
     body = response.json()
     assert body["refusal_reason"] == "off-topic"
+    # The score the guard actually rejected must come back with the refusal.
+    # Without it an off-topic refusal and a miscalibrated threshold are
+    # indistinguishable from the browser, which is how a threshold refusing
+    # 38.5% of real in-corpus questions went unnoticed on the live service.
+    assert body["top_score"] == 0.9
 
 
 @patch("app.main.transcribe")

@@ -72,9 +72,16 @@ def _refusal(
     stages: dict[str, float],
     strategy: str,
     transcript: str | None = None,
+    top_score: float | None = None,
 ) -> dict[str, Any]:
     # Transcript is echoed back even on refusal: TS-002/TS-003 both expect the
     # user to see what was heard before being told it cannot be answered.
+    #
+    # top_score is reported on refusals too, not only on the success path. An
+    # off-topic refusal that shows no score is undiagnosable from the browser:
+    # a miscalibrated threshold and a genuinely off-topic question produce the
+    # identical response. That is exactly how a threshold refusing 38.5% of
+    # real in-corpus questions reached the live service unnoticed.
     return {
         "transcript": transcript,
         "answer": None,
@@ -82,6 +89,7 @@ def _refusal(
         "latency_ms": latency_ms,
         "stages_ms": stages,
         "strategy": strategy,
+        "top_score": top_score,
     }
 
 
@@ -146,11 +154,18 @@ async def ask(
 
     mark = time.perf_counter()
     top_score = retrieval.passages[0].score if retrieval.passages else 0.0
-    off_topic = check_off_topic(top_similarity_score=top_score)
+    off_topic = check_off_topic(top_similarity_score=top_score, strategy=strategy)
     stages["guardrail_off_topic"] = _elapsed_ms(mark)
     if not off_topic.passed:
         return JSONResponse(
-            _refusal(off_topic.reason, _elapsed_ms(start), stages, strategy, transcript)
+            _refusal(
+                off_topic.reason,
+                _elapsed_ms(start),
+                stages,
+                strategy,
+                transcript,
+                top_score,
+            )
         )
 
     mark = time.perf_counter()
@@ -177,7 +192,14 @@ async def ask(
     stages["guardrail_groundedness"] = _elapsed_ms(mark)
     if not grounded.passed:
         return JSONResponse(
-            _refusal(grounded.reason, _elapsed_ms(start), stages, strategy, transcript)
+            _refusal(
+                grounded.reason,
+                _elapsed_ms(start),
+                stages,
+                strategy,
+                transcript,
+                top_score,
+            )
         )
 
     return JSONResponse(

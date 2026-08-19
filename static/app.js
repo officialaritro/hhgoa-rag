@@ -99,9 +99,13 @@ function displayResult(data) {
     answerEl.textContent = data.answer;
     answerEl.className = "";
   } else {
-    // A refusal is a successful outcome, not an error -- show why.
+    // A refusal is a successful outcome, not an error -- show why. The top
+    // retrieval score is shown alongside the reason so a refusal can be told
+    // apart from a miscalibrated threshold without shell access to the box.
+    const score =
+      data.top_score != null ? ` (top match ${data.top_score.toFixed(3)})` : "";
     answerEl.textContent = data.refusal_reason
-      ? `Cannot answer — ${data.refusal_reason}`
+      ? `Cannot answer — ${data.refusal_reason}${score}`
       : "";
     answerEl.className = "refusal";
   }
