@@ -4,6 +4,7 @@ from app.strategies import (
     Strategy,
     UnknownStrategy,
     chunk_paths,
+    dense_names,
     get,
     names,
     per_passage,
@@ -90,3 +91,37 @@ def test_whole_passage_chunker_produces_exactly_one_span_per_passage():
     assert len(chunks) == 2
     assert chunks[0] == {"parent_id": 0, "start": 0, "end": 900}
     assert chunks[1] == {"parent_id": 1, "start": 0, "end": 5}
+
+
+def test_only_semantic_needs_embeddings_to_chunk():
+    """Everything except semantic chunks with pure string operations, so the
+    build can cheaply count chunks first and show a real percentage and ETA.
+    Semantic cannot: counting its chunks means running the boundary detection,
+    which is the expensive half of its build."""
+    embedding_chunkers = {n for n in dense_names() if get(n).chunking_embeds}
+
+    assert embedding_chunkers == {"semantic"}
+
+
+def test_countable_strategies_report_a_total_cheaply():
+    """The count pass must not call the embedding model -- if it did, the
+    'cheap' pre-pass would double the cost of the build."""
+    import app.embeddings
+
+    passages = [
+        {"text": "One. Two. Three.", "is_selected": False, "query_id": 1, "query": "q"},
+        {"text": "x" * 1500, "is_selected": False, "query_id": 1, "query": "q"},
+    ]
+    calls = []
+    original = app.embeddings.embed_batch
+    app.embeddings.embed_batch = lambda *a, **k: calls.append(1) or original(*a, **k)
+    try:
+        for name in dense_names():
+            strategy = get(name)
+            if strategy.chunking_embeds:
+                continue
+            assert len(list(strategy.chunker(passages))) > 0, name
+    finally:
+        app.embeddings.embed_batch = original
+
+    assert calls == [], "a countable chunker called the embedding model"

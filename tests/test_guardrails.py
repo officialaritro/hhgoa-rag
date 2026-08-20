@@ -2,7 +2,13 @@ from unittest.mock import patch
 
 import pytest
 
-from app.guardrails import check_groundedness, check_off_topic, check_unsafe_input
+from app.guardrails import (
+    MissingCalibration,
+    check_groundedness,
+    check_off_topic,
+    check_unsafe_input,
+    offtopic_threshold,
+)
 from app.schemas import RetrievalOutput, RetrievedPassage
 
 
@@ -106,10 +112,18 @@ def test_threshold_falls_back_when_unset_blank_or_unparseable(monkeypatch):
 
 
 def test_check_off_topic_rejects_a_strategy_with_no_measured_threshold():
-    """Silently borrowing another index's threshold is the bug this table
-    exists to prevent, so an unmeasured strategy must fail loudly."""
-    with pytest.raises(ValueError, match="no measured off-topic threshold"):
-        check_off_topic(top_similarity_score=0.8, strategy="hnsw_experimental")
+    """Silently borrowing another index's threshold is the bug this guard exists
+    to prevent, so an unmeasured strategy must fail loudly.
+
+    The threshold now comes from the index manifest rather than a module dict,
+    so an unbuilt or uncalibrated strategy raises MissingCalibration.
+    """
+    offtopic_threshold.cache_clear()
+    try:
+        with pytest.raises(MissingCalibration):
+            check_off_topic(top_similarity_score=0.8, strategy="hnsw_experimental")
+    finally:
+        offtopic_threshold.cache_clear()
 
 
 def test_check_unsafe_input_flags_a_credential_request():

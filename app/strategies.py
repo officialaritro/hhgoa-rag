@@ -8,31 +8,39 @@ missed entry is exactly the defect class that put a threshold calibrated
 against one index into production as another index's default.
 
 Everything downstream -- build, retrieval, `/api/strategies`, threshold
-lookup, evaluation -- derives from this registry.
+lookup, evaluation -- derives from this registry. The chunking algorithms live
+in app/chunkers.py; this module only says which ones exist and how they are
+described.
 """
 
-from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
-from typing import Literal, TypedDict
+from typing import Literal
 
-from app.passages import Passage
+from app.chunkers import (
+    fixed_size_chunker,
+    parent_child_chunker,
+    query_aware_chunker,
+    query_aware_heldout_chunker,
+    query_group_chunker,
+    recursive_chunker,
+    semantic_chunker,
+    sentence_window_chunker,
+    whole_passage_chunker,
+)
+from app.passages import Chunk, Chunker, per_passage
 
-
-class Chunk(TypedDict, total=False):
-    """A span of one parent passage, or (when `text` is present) a chunk that is
-    not a contiguous substring of any single parent."""
-
-    parent_id: int
-    start: int
-    end: int
-    text: str
-
-
-# A chunker sees the whole store, not one passage at a time, because not every
-# strategy is per-passage: query_group deliberately aggregates across all the
-# passages sharing a query_id. Per-passage strategies wrap themselves in
-# `per_passage` rather than each re-implementing the loop.
-Chunker = Callable[[list[Passage]], Iterator[Chunk]]
+__all__ = [
+    "Chunk",
+    "Chunker",
+    "Strategy",
+    "UnknownStrategy",
+    "chunk_paths",
+    "dense_names",
+    "get",
+    "names",
+    "per_passage",
+    "served_names",
+]
 
 
 class UnknownStrategy(KeyError):
@@ -47,42 +55,119 @@ class UnknownStrategy(KeyError):
 class Strategy:
     name: str
     kind: Literal["dense", "hybrid", "fusion"]
+    axis: Literal["split", "unit", "enrichment", "aggregation", "fusion"]
     description: str
     chunker: Chunker | None = None
     members: tuple[str, ...] = field(default_factory=tuple)
-
-
-def per_passage(
-    fn: Callable[[Passage, int], Iterable[Chunk]],
-) -> Chunker:
-    """Adapts a per-passage chunker into a corpus-level one, passing each
-    passage's id so the yielded spans can address their parent."""
-
-    def chunker(passages: list[Passage]) -> Iterator[Chunk]:
-        for passage_id, passage in enumerate(passages):
-            yield from fn(passage, passage_id)
-
-    return chunker
-
-
-def _whole_passage(passage: Passage, passage_id: int) -> Iterator[Chunk]:
-    """No split at all: one vector per passage.
-
-    This is the control strategy. Measured on this corpus, `fixed_size`'s
-    700-char window only exceeds 1.4% of passages (p99 is 727 chars), so it
-    produces 101,131 chunks from 99,767 passages -- 98.6% of its output is the
-    unmodified passage. This strategy makes that comparison explicit: if the
-    two score the same, fixed-size chunking is doing nothing on this corpus.
-    """
-    yield {"parent_id": passage_id, "start": 0, "end": len(passage["text"])}
+    # True when chunking itself calls the embedding model. Only semantic does,
+    # and it is why semantic alone cannot report a chunk total before the build:
+    # counting its chunks means running the boundary detection, which is the
+    # expensive half of its work. Everything else chunks with string operations,
+    # so the build counts first and shows a real percentage and ETA.
+    chunking_embeds: bool = False
+    # False for measurement controls: indices built to answer a question about
+    # another strategy, which should not be offered as something to retrieve
+    # from. They are still built, calibrated and evaluated.
+    served: bool = True
 
 
 _REGISTRY: dict[str, Strategy] = {
     "whole_passage": Strategy(
         name="whole_passage",
         kind="dense",
-        description="No split; one vector per passage. The control strategy.",
-        chunker=per_passage(_whole_passage),
+        axis="split",
+        description=(
+            "No split; one vector per passage. The control: fixed_size's window "
+            "exceeds only 1.4% of passages, so if these two score alike, "
+            "fixed-size chunking is doing nothing on this corpus."
+        ),
+        chunker=whole_passage_chunker,
+    ),
+    "fixed_size": Strategy(
+        name="fixed_size",
+        kind="dense",
+        axis="split",
+        description="700-character windows, 20% overlap, cutting mid-word.",
+        chunker=fixed_size_chunker,
+    ),
+    "recursive": Strategy(
+        name="recursive",
+        kind="dense",
+        axis="split",
+        description=(
+            "Sentence-aligned packing to ~400 characters with one sentence of "
+            "overlap. Fixed-size chunking done without cutting words in half."
+        ),
+        chunker=recursive_chunker,
+    ),
+    "semantic": Strategy(
+        name="semantic",
+        kind="dense",
+        axis="split",
+        description=(
+            "Splits where adjacent sentences stop being similar, at a retuned "
+            "threshold. At the shipped 0.8 it merged almost nothing."
+        ),
+        chunker=semantic_chunker,
+        chunking_embeds=True,
+    ),
+    "parent_child": Strategy(
+        name="parent_child",
+        kind="dense",
+        axis="unit",
+        description=(
+            "Embeds a ~200-character child for precision, returns the whole "
+            "parent passage for context."
+        ),
+        chunker=parent_child_chunker,
+    ),
+    "sentence_window": Strategy(
+        name="sentence_window",
+        kind="dense",
+        axis="unit",
+        description=(
+            "Embeds a single sentence, returns it with one neighbour on each "
+            "side. The most precise embedding unit that keeps its context."
+        ),
+        chunker=sentence_window_chunker,
+    ),
+    "query_aware": Strategy(
+        name="query_aware",
+        kind="dense",
+        axis="enrichment",
+        description=(
+            "Embeds the passage with its own gold query prepended, returns the "
+            "passage bare. Document expansion with no generated queries, since "
+            "the dataset already ships the question each passage answers."
+        ),
+        chunker=query_aware_chunker,
+    ),
+    "query_aware_heldout": Strategy(
+        name="query_aware_heldout",
+        kind="dense",
+        axis="enrichment",
+        description=(
+            "query_aware's control: identical, except the evaluated rows' "
+            "passages are embedded without their own query. Measures whether "
+            "query enrichment generalises to a question the index was not "
+            "built around, which searching the enriched index cannot."
+        ),
+        chunker=query_aware_heldout_chunker,
+        # A control, not a product. Its own off-topic threshold is not even
+        # meaningful: calibration samples different rows than the evaluation
+        # holds out, so most calibration queries still match their own enriched
+        # passages. Only its recall against the held-out queries is valid.
+        served=False,
+    ),
+    "query_group": Strategy(
+        name="query_group",
+        kind="dense",
+        axis="aggregation",
+        description=(
+            "Concatenates every passage sharing a query_id into one document, "
+            "then splits at ~1000 characters. Aggregates upward instead of down."
+        ),
+        chunker=query_group_chunker,
     ),
 }
 
@@ -98,6 +183,21 @@ def get(name: str) -> Strategy:
 
 def names() -> tuple[str, ...]:
     return tuple(_REGISTRY)
+
+
+def dense_names() -> tuple[str, ...]:
+    """Strategies backed by their own index, i.e. the ones a build produces.
+
+    Includes measurement controls, which are built and evaluated but not served.
+    Composed kinds (hybrid, fusion) are served by combining these at request
+    time and have nothing of their own to build.
+    """
+    return tuple(n for n, s in _REGISTRY.items() if s.kind == "dense")
+
+
+def served_names() -> tuple[str, ...]:
+    """Strategies a request may retrieve from. Excludes measurement controls."""
+    return tuple(n for n, s in _REGISTRY.items() if s.served)
 
 
 def chunk_paths(name: str) -> tuple[str, str]:

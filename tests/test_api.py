@@ -3,7 +3,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from app.harness import StageResult
-from app.main import app
+from app.main import COMPARE_DEFAULT, app
 from app.schemas import GenerationOutput, RetrievalOutput, RetrievedPassage, STTOutput
 
 client = TestClient(app)
@@ -159,14 +159,41 @@ def test_health_stays_503_when_startup_warmup_fails(mock_retrieve):
     assert response.status_code == 503
 
 
-def test_strategies_endpoint_lists_both_indices():
-    """Both chunking strategies are built and indexed, so both must be
-    offerable -- the frontend reads this rather than hard-coding one."""
+def test_strategies_endpoint_lists_every_registered_strategy():
+    """Derived from the registry, never hard-coded. Strategy identity used to be
+    duplicated across four modules, and a strategy present in one but missing
+    from another is how a miscalibrated threshold reached production."""
+    from app.strategies import dense_names, served_names
+
     response = client.get("/api/strategies")
     assert response.status_code == 200
     body = response.json()
-    assert set(body["strategies"]) == {"fixed_size", "semantic"}
+    assert set(body["strategies"]) == set(served_names())
+    # Measurement controls are built and evaluated but must not be offered as
+    # something to retrieve from -- query_aware_heldout exists only to answer a
+    # question about query_aware, and its own threshold is not meaningful.
+    assert set(body["strategies"]) < set(dense_names())
     assert body["default"] in body["strategies"]
+
+
+def test_strategies_endpoint_describes_each_strategy_for_the_ui():
+    """Eight strategy names mean nothing to someone looking at a radio group.
+    The registry already carries a description and an axis; the frontend should
+    not have to restate them."""
+    response = client.get("/api/strategies")
+    body = response.json()
+
+    assert body["details"], "no per-strategy detail returned"
+    for name in body["strategies"]:
+        detail = body["details"][name]
+        assert detail["description"].strip()
+        assert detail["axis"] in {
+            "split",
+            "unit",
+            "enrichment",
+            "aggregation",
+            "fusion",
+        }
 
 
 def test_ask_rejects_an_unknown_strategy_without_running_the_pipeline():
@@ -359,7 +386,9 @@ def test_compare_answers_both_strategies_from_one_transcription(
     body = response.json()
     assert body["transcript"] == "what is x"
     assert mock_transcribe.call_count == 1
-    assert set(body["results"]) == {"fixed_size", "semantic"}
+    # compare narrows to an explicit subset by default: fanning out to all
+    # eight would issue eight generation calls per request.
+    assert set(body["results"]) == set(COMPARE_DEFAULT)
     for result in body["results"].values():
         assert result["answer"] == "x is y"
         assert result["passages"] == [
@@ -370,9 +399,9 @@ def test_compare_answers_both_strategies_from_one_transcription(
                 "score": 0.9,
             }
         ]
-    assert mock_retrieve.call_count == 2
+    assert mock_retrieve.call_count == len(COMPARE_DEFAULT)
     called_strategies = {c.kwargs["strategy"] for c in mock_retrieve.call_args_list}
-    assert called_strategies == {"fixed_size", "semantic"}
+    assert called_strategies == set(COMPARE_DEFAULT)
     assert all(c.kwargs["query"] == "what is x" for c in mock_retrieve.call_args_list)
 
 
@@ -422,8 +451,13 @@ def test_compare_isolates_a_failing_strategy_branch(
     )
     mock_unsafe.return_value.passed = True
 
+    # The failing and surviving strategies are taken from COMPARE_DEFAULT
+    # rather than named, so changing which strategies are compared cannot
+    # quietly turn this into a test where nothing fails.
+    failing, surviving = COMPARE_DEFAULT[1], COMPARE_DEFAULT[0]
+
     def retrieve_side_effect(*, query, strategy, **kwargs):
-        if strategy == "semantic":
+        if strategy == failing:
             raise RuntimeError("boom")
         return _ok_retrieval()
 
@@ -438,9 +472,9 @@ def test_compare_isolates_a_failing_strategy_branch(
 
     assert response.status_code == 200
     body = response.json()
-    assert body["results"]["fixed_size"]["answer"] == "x is y"
-    assert body["results"]["semantic"]["answer"] is None
-    assert body["results"]["semantic"]["refusal_reason"] == "internal error"
+    assert body["results"][surviving]["answer"] == "x is y"
+    assert body["results"][failing]["answer"] is None
+    assert body["results"][failing]["refusal_reason"] == "internal error"
 
 
 @patch("app.main.check_groundedness")
@@ -472,7 +506,9 @@ def test_ask_refuses_when_the_model_declines_to_answer(
     mock_offtopic.return_value.passed = True
     mock_generate.return_value = StageResult(
         ok=True,
-        value=GenerationOutput(answer="INSUFFICIENT_CONTEXT", insufficient_context=True),
+        value=GenerationOutput(
+            answer="INSUFFICIENT_CONTEXT", insufficient_context=True
+        ),
     )
 
     body = client.post("/api/ask", content=b"audio").json()

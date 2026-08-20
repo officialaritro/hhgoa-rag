@@ -211,3 +211,59 @@ def test_sidecar_records_the_embedding_model(mock, tmp_path):
     assert sidecar["count"] == 12
     assert sidecar["dimension"] == DIM
     assert "all-MiniLM-L6-v2" in sidecar["embedding_model"]
+
+
+@patch("app.vectors.embed_batch", side_effect=_fake_embed)
+def test_embeds_the_embed_text_not_the_return_text(mock, tmp_path):
+    """Three strategies embed something different from what they return. If the
+    build embeds the return text, query_aware silently loses its query and
+    parent_child embeds the whole parent -- both become plain whole_passage
+    while still looking like distinct strategies in the report.
+    """
+    passages = [
+        {
+            "text": "Coatis are raccoon relatives.",
+            "is_selected": False,
+            "query_id": 1,
+            "query": "what is a coati",
+        }
+    ]
+    chunks = [
+        {"parent_id": 0, "start": 0, "end": 29, "embed_query": True},
+    ]
+
+    embed_chunks_to_disk(
+        chunks=iter(chunks),
+        passages=passages,
+        vectors_path=str(tmp_path / "v.f32"),
+        metadata_path=str(tmp_path / "m.pkl"),
+        batch_size=4,
+    )
+
+    embedded = mock.call_args_list[0].args[0][0]
+    assert "what is a coati" in embedded, f"query was not embedded: {embedded!r}"
+
+
+@patch("app.vectors.embed_batch", side_effect=_fake_embed)
+def test_embeds_the_child_span_when_the_return_span_is_wider(mock, tmp_path):
+    passages = [
+        {
+            "text": "A" * 100 + "B" * 100,
+            "is_selected": False,
+            "query_id": 1,
+            "query": "q",
+        }
+    ]
+    chunks = [
+        {"parent_id": 0, "start": 100, "end": 200, "ret_start": 0, "ret_end": 200}
+    ]
+
+    embed_chunks_to_disk(
+        chunks=iter(chunks),
+        passages=passages,
+        vectors_path=str(tmp_path / "v.f32"),
+        metadata_path=str(tmp_path / "m.pkl"),
+    )
+
+    embedded = mock.call_args_list[0].args[0][0]
+    assert embedded == "B" * 100, "embedded the return span instead of the child"

@@ -1,71 +1,255 @@
+"""Retrieval over span-addressed chunks.
+
+Two behaviours here are correctness fixes rather than features:
+
+  * dedup by parent. With 20% overlap, several of the top-k slots could be
+    near-identical text from one passage, silently shrinking the distinct
+    context handed to generation. Retrieval over-fetches and collapses.
+  * `text` is the strategy's *return* text, not the embedded text. For
+    parent_child and sentence_window those differ deliberately, and returning
+    the embedded span instead would erase the difference between those
+    strategies and plain fixed-size chunking.
+"""
+
 from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
 
-from app.retrieval import _load_cached, retrieve
+from app.retrieval import _load_cached, _load_passages, retrieve
+from app.strategies import UnknownStrategy
 
 
 @pytest.fixture(autouse=True)
-def _clear_index_cache():
+def _clear_caches():
     _load_cached.cache_clear()
+    _load_passages.cache_clear()
     yield
     _load_cached.cache_clear()
+    _load_passages.cache_clear()
 
 
-def _fake_index_and_metadata():
-    fake_index = MagicMock()
-    fake_index.search.return_value = (
-        np.array([[0.9, 0.4]]),  # distances (inner-product scores)
-        np.array([[1, 0]]),  # indices into metadata
-    )
-    metadata = [
-        {"text": "chunk zero", "source_passage": "passage zero", "is_selected": False},
-        {"text": "chunk one", "source_passage": "passage one", "is_selected": True},
-    ]
-    return fake_index, metadata
+PASSAGES = [
+    {
+        "text": "Alpha sentence. Beta sentence. Gamma sentence.",
+        "is_selected": True,
+        "query_id": 1,
+        "query": "what is alpha",
+    },
+    {
+        "text": "An unrelated passage about turbines.",
+        "is_selected": False,
+        "query_id": 2,
+        "query": "what is a turbine",
+    },
+]
 
 
-@patch("app.retrieval.embed")
+def _index_returning(order, scores=None):
+    """A fake FAISS index returning the given row ids in the given order."""
+    index = MagicMock()
+    scores = scores or [0.9 - 0.1 * i for i in range(len(order))]
+    index.search.return_value = (np.array([scores]), np.array([order]))
+    return index
+
+
+@patch("app.retrieval.embed", return_value=np.zeros(3))
 @patch("app.retrieval.load_index")
-def test_retrieve_returns_passages_ranked_by_score(mock_load_index, mock_embed):
-    mock_load_index.return_value = _fake_index_and_metadata()
-    mock_embed.return_value = np.zeros(3)
+@patch("app.retrieval.load_passage_store", return_value=PASSAGES)
+def test_returns_passages_ranked_by_score(mock_store, mock_load, mock_embed):
+    rows = [
+        {"parent_id": 0, "start": 0, "end": 15},
+        {"parent_id": 1, "start": 0, "end": 36},
+    ]
+    mock_load.return_value = (_index_returning([1, 0], [0.9, 0.4]), rows)
 
-    result = retrieve(query="what happened", strategy="fixed_size", k=2)
+    result = retrieve(query="what happened", strategy="whole_passage", k=2)
 
     assert result.query == "what happened"
-    assert result.strategy == "fixed_size"
+    assert result.strategy == "whole_passage"
+    assert [p.score for p in result.passages] == [0.9, 0.4]
+    assert result.passages[0].text == "An unrelated passage about turbines."
+    assert result.passages[1].text == "Alpha sentence."
+
+
+@patch("app.retrieval.embed", return_value=np.zeros(3))
+@patch("app.retrieval.load_index")
+@patch("app.retrieval.load_passage_store", return_value=PASSAGES)
+def test_collapses_multiple_chunks_from_the_same_parent(
+    mock_store, mock_load, mock_embed
+):
+    """The correctness fix. Three overlapping chunks of passage 0 must not
+    occupy three of the caller's slots."""
+    rows = [
+        {"parent_id": 0, "start": 0, "end": 15},
+        {"parent_id": 0, "start": 16, "end": 30},
+        {"parent_id": 0, "start": 31, "end": 45},
+        {"parent_id": 1, "start": 0, "end": 36},
+    ]
+    mock_load.return_value = (_index_returning([0, 1, 2, 3]), rows)
+
+    result = retrieve(query="q", strategy="fixed_size", k=2)
+
     assert len(result.passages) == 2
-    assert result.passages[0].text == "chunk one"
-    assert result.passages[0].score == 0.9
-    assert result.passages[0].is_selected is True
-    assert result.passages[1].text == "chunk zero"
+    assert [p.source_passage for p in result.passages] == [
+        PASSAGES[0]["text"],
+        PASSAGES[1]["text"],
+    ]
 
 
-@patch("app.retrieval.embed")
+@patch("app.retrieval.embed", return_value=np.zeros(3))
 @patch("app.retrieval.load_index")
-def test_retrieve_loads_the_index_matching_the_requested_strategy(
-    mock_load_index, mock_embed
+@patch("app.retrieval.load_passage_store", return_value=PASSAGES)
+def test_keeps_the_best_scoring_chunk_of_a_collapsed_parent(
+    mock_store, mock_load, mock_embed
 ):
-    mock_load_index.return_value = _fake_index_and_metadata()
-    mock_embed.return_value = np.zeros(3)
+    rows = [
+        {"parent_id": 0, "start": 16, "end": 30},
+        {"parent_id": 0, "start": 0, "end": 15},
+    ]
+    mock_load.return_value = (_index_returning([0, 1], [0.95, 0.5]), rows)
 
-    retrieve(query="q", strategy="semantic", k=1)
+    result = retrieve(query="q", strategy="fixed_size", k=5)
 
-    call_args = mock_load_index.call_args
-    assert "semantic" in str(call_args)
+    assert len(result.passages) == 1
+    assert result.passages[0].score == 0.95
+    assert result.passages[0].text == "Beta sentence."
 
 
-@patch("app.retrieval.embed")
+@patch("app.retrieval.embed", return_value=np.zeros(3))
 @patch("app.retrieval.load_index")
-def test_retrieve_loads_the_index_from_disk_only_once_per_strategy(
-    mock_load_index, mock_embed
+@patch("app.retrieval.load_passage_store", return_value=PASSAGES)
+def test_over_fetches_so_dedup_can_still_fill_k(mock_store, mock_load, mock_embed):
+    """Searching for exactly k and then deduping would return fewer than k
+    whenever any two hits share a parent."""
+    rows = [{"parent_id": 0, "start": 0, "end": 15}]
+    index = _index_returning([0])
+    mock_load.return_value = (index, rows)
+
+    retrieve(query="q", strategy="fixed_size", k=5)
+
+    requested = index.search.call_args.args[1]
+    assert requested > 5, f"searched for only {requested}, leaving no room to dedup"
+
+
+@patch("app.retrieval.embed", return_value=np.zeros(3))
+@patch("app.retrieval.load_index")
+@patch("app.retrieval.load_passage_store", return_value=PASSAGES)
+def test_text_is_the_return_span_and_source_passage_is_the_parent(
+    mock_store, mock_load, mock_embed
 ):
-    mock_load_index.return_value = _fake_index_and_metadata()
-    mock_embed.return_value = np.zeros(3)
+    """sentence_window embeds one sentence and returns a wider window. `text`
+    must carry the window; `source_passage` must stay the exact parent so
+    evaluation can match it against the corpus relevance labels."""
+    # ret_end from len(), not hand-counted: the passage is 46 chars and an
+    # off-by-one here silently clips the last character of every window.
+    rows = [
+        {
+            "parent_id": 0,
+            "start": 16,
+            "end": 30,
+            "ret_start": 0,
+            "ret_end": len(PASSAGES[0]["text"]),
+        }
+    ]
+    mock_load.return_value = (_index_returning([0]), rows)
+
+    result = retrieve(query="q", strategy="sentence_window", k=1)
+
+    assert result.passages[0].text == PASSAGES[0]["text"]
+    assert result.passages[0].source_passage == PASSAGES[0]["text"]
+
+
+@patch("app.retrieval.embed", return_value=np.zeros(3))
+@patch("app.retrieval.load_index")
+@patch("app.retrieval.load_passage_store", return_value=PASSAGES)
+def test_stored_text_chunks_report_their_own_text_as_the_source(
+    mock_store, mock_load, mock_embed
+):
+    """query_group chunks span several passages, so no single parent is their
+    source. Reporting a nominal parent would understate them in evaluation."""
+    rows = [{"parent_id": 0, "start": 0, "end": 0, "text": "passage one. passage two."}]
+    mock_load.return_value = (_index_returning([0]), rows)
+
+    result = retrieve(query="q", strategy="query_group", k=1)
+
+    assert result.passages[0].text == "passage one. passage two."
+    assert result.passages[0].source_passage == "passage one. passage two."
+
+
+@patch("app.retrieval.embed", return_value=np.zeros(3))
+@patch("app.retrieval.load_index")
+@patch("app.retrieval.load_passage_store", return_value=PASSAGES)
+def test_is_selected_comes_from_the_parent_passage(mock_store, mock_load, mock_embed):
+    rows = [
+        {"parent_id": 0, "start": 0, "end": 15},
+        {"parent_id": 1, "start": 0, "end": 36},
+    ]
+    mock_load.return_value = (_index_returning([0, 1]), rows)
+
+    result = retrieve(query="q", strategy="whole_passage", k=2)
+
+    assert [p.is_selected for p in result.passages] == [True, False]
+
+
+@patch("app.retrieval.embed", return_value=np.zeros(3))
+@patch("app.retrieval.load_index")
+@patch("app.retrieval.load_passage_store", return_value=PASSAGES)
+def test_ignores_the_empty_slots_faiss_pads_with(mock_store, mock_load, mock_embed):
+    """FAISS returns -1 for rows it could not fill. Indexing metadata with -1
+    silently returns the last chunk in the store as a match."""
+    rows = [{"parent_id": 0, "start": 0, "end": 15}]
+    mock_load.return_value = (_index_returning([0, -1, -1], [0.9, -1.0, -1.0]), rows)
+
+    result = retrieve(query="q", strategy="whole_passage", k=3)
+
+    assert len(result.passages) == 1
+
+
+@patch("app.retrieval.embed", return_value=np.zeros(3))
+@patch("app.retrieval.load_index")
+@patch("app.retrieval.load_passage_store", return_value=PASSAGES)
+def test_loads_each_index_from_disk_only_once(mock_store, mock_load, mock_embed):
+    rows = [{"parent_id": 0, "start": 0, "end": 15}]
+    mock_load.return_value = (_index_returning([0]), rows)
 
     retrieve(query="first", strategy="fixed_size", k=1)
     retrieve(query="second", strategy="fixed_size", k=1)
 
-    assert mock_load_index.call_count == 1
+    assert mock_load.call_count == 1
+
+
+@patch("app.retrieval.embed", return_value=np.zeros(3))
+@patch("app.retrieval.load_index")
+@patch("app.retrieval.load_passage_store", return_value=PASSAGES)
+def test_loads_the_index_matching_the_requested_strategy(
+    mock_store, mock_load, mock_embed
+):
+    rows = [{"parent_id": 0, "start": 0, "end": 15}]
+    mock_load.return_value = (_index_returning([0]), rows)
+
+    retrieve(query="q", strategy="query_aware", k=1)
+
+    assert "query_aware" in str(mock_load.call_args)
+
+
+def test_unknown_strategy_raises_the_registry_error():
+    with pytest.raises(UnknownStrategy):
+        retrieve(query="q", strategy="not_a_strategy", k=1)
+
+
+@patch("app.retrieval.embed", return_value=np.zeros(3))
+@patch("app.retrieval.load_index")
+@patch("app.retrieval.load_passage_store", return_value=PASSAGES)
+def test_every_registered_strategy_is_retrievable(mock_store, mock_load, mock_embed):
+    """The coupling that matters at request time: a strategy in the registry
+    with no path or no dispatch branch fails per request, not at startup."""
+    from app.strategies import dense_names
+
+    rows = [{"parent_id": 0, "start": 0, "end": 15}]
+    mock_load.return_value = (_index_returning([0]), rows)
+
+    for name in dense_names():
+        result = retrieve(query="q", strategy=name, k=1)
+        assert result.strategy == name
+        assert len(result.passages) == 1
