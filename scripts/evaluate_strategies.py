@@ -360,8 +360,10 @@ def write_report() -> None:
     total_mb = sum(r["index_mb"] + r["metadata_mb"] for r in results)
     lines += [
         "",
-        f"**{total_chunks:,} vectors across {len(results)} indices, "
-        f"{total_mb:.0f} MB total.**",
+        (
+            f"**{total_chunks:,} vectors across {len(results)} indices, "
+            f"{total_mb:.0f} MB total.**"
+        ),
         "Chunk metadata is span-addressed -- `(parent_id, start, end)` into one shared",
         "passage store -- rather than each chunk carrying its own copy of its parent text.",
         "That is 18.4 bytes per chunk against 763.9 measured on the previous scheme, a 41x",
