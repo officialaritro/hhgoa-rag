@@ -23,12 +23,25 @@ def active_model_name() -> str:
     return os.environ.get("EMBEDDING_MODEL_NAME", _DEFAULT_MODEL_NAME)
 
 
+def active_device() -> str | None:
+    """Torch device for the embedding model, or None to let
+    sentence-transformers choose.
+
+    The service leaves this unset: the instance has no GPU, so auto-detection
+    correctly lands on CPU. The overnight index build sets it to "mps", because
+    on Apple Silicon that is 506 texts/sec against 326 on CPU (measured) -- a
+    50-minute build instead of 78. Left to auto-detection an unattended build
+    can quietly take the slow path and only reveal it in the morning.
+    """
+    return os.environ.get("EMBEDDING_DEVICE", "").strip() or None
+
+
 @lru_cache(maxsize=1)
 def _get_model():
     from sentence_transformers import SentenceTransformer
 
     model_name = os.environ.get("EMBEDDING_MODEL_NAME", _DEFAULT_MODEL_NAME)
-    return SentenceTransformer(model_name)
+    return SentenceTransformer(model_name, device=active_device())
 
 
 def embed(text: str) -> NDArray[np.float32]:

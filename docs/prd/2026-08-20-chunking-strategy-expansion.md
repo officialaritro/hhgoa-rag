@@ -198,8 +198,8 @@ class Strategy:
     name: str
     kind: Literal["dense", "hybrid", "fusion"]
     chunker: Callable[[Row], Iterator[Chunk]] | None  # None for composed kinds
-    members: tuple[str, ...] = ()                     # fusion members
-    description: str = ""                             # surfaced by /api/strategies
+    members: tuple[str, ...] = ()  # fusion members
+    description: str = ""  # surfaced by /api/strategies
 ```
 
 Index paths, the build loop, `/api/strategies`, threshold lookup and the evaluation loop
