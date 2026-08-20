@@ -339,24 +339,91 @@ converts "vast" from a claim into a measurement.
 ## Build and Deploy Plan
 
 Building ~1.15M chunk embeddings plus ~349,983 sentence embeddings for semantic boundary
-detection is ~1.5M embeds. At the measured ~330/sec that is **~76 minutes on the serving
+detection is ~1.5M embeds. At the measured ~330/sec that is **~77 minutes on the serving
 instance's 2 vCPU** — an hour-plus of CPU starvation on the box running the live demo,
-two days before a no-resubmission deadline.
+two days before a no-resubmission deadline. So the build happens off the serving box.
 
-Instead:
+### Chosen: build locally on Apple Silicon, ship the artifacts
 
-1. Launch a temporary **`c7i.4xlarge`** (16 vCPU) in `ap-south-1`.
-2. Install with the **CPU-only torch pin** from `pyproject.toml`'s `[tool.uv.sources]`.
-   This is mandatory: the default wheel pulls ~4.6 GB of unusable CUDA packages and has
-   already exhausted a 20 GiB volume once on this project.
-3. Build all indices there: ~10-12 minutes at 8× the cores.
-4. Upload `data/` to S3.
-5. Pull onto `i-09e157bfae9bb82a6`, restart the service.
-6. Terminate the build instance.
+Measured on the development machine (MacBook Air M1, 8 GB, macOS arm64) on 2026-08-21:
 
-Approximately $1 of compute, and the demo never stops serving. `deploy/setup.sh` changes
-its index-bootstrap step from "build if missing" to "fetch from S3 if missing, build only
-as fallback," so a fresh deploy no longer implies an hour of embedding.
+| Device | Throughput | 1.5M embeds |
+|---|---|---|
+| Local M1, MPS (Metal) | **506 texts/sec** | **~50 min** |
+| Local M1, CPU | 326 texts/sec | ~78 min |
+| EC2 `m7i-flex.large`, 2 vCPU | ~330 texts/sec | ~77 min |
+| EC2 `c7i.4xlarge`, 16 vCPU (not used) | ~2,600 texts/sec est. | ~10 min |
+
+MPS is chosen: it is free, needs no provisioning, and the serving box keeps its CPU. The
+~50 min figure is a short-burst measurement; the M1 Air is fanless and will thermal
+throttle over a sustained run, so **plan for 65-90 min** and run it overnight.
+
+**Artifact portability is verified, not assumed.** A `IndexScalarQuantizer` index built on
+arm64 macOS / Python 3.14 / numpy 2.5.2 / faiss 1.15.0 was transferred to the instance and
+read back on x86_64 Linux / Python 3.12.3 / numpy 2.5.2 / faiss 1.15.0:
+
+- FAISS search results are **bit-identical** across the two architectures.
+- Pickle protocols 4 and 5 both load on the instance (its `HIGHEST_PROTOCOL` is 5, so the
+  local 3.14 default of protocol 5 is safe). `.npy` span arrays load unchanged.
+  Local Python stays at the `.python-version` 3.14 — no downgrade to match the instance's
+  3.12 is needed, and `.github/workflows/ci.yml` already tests both deliberately. As
+  belt-and-braces, metadata pickles are written with an **explicit** `protocol=4` rather
+  than the interpreter default, so the artifact does not silently change if either side's
+  Python moves. Bulk span data uses `.npy`, which is protocol-independent.
+- numpy and faiss versions match exactly on both sides, so no version skew to manage.
+
+**MPS-versus-CPU numerics are verified.** The index is built from MPS-computed vectors
+while queries are embedded on the instance's x86 CPU. Measured over 256 texts: cosine
+agreement **1.000000** (min and mean), max elementwise delta **1.9e-07**, and **100%
+identical top-1 and top-5** for MPS queries against a CPU-built index. The device split
+between build time and query time is a non-issue.
+
+### Required prerequisite: `build_index` must stream
+
+`app/indexing.py`'s `build_index` currently embeds *every* chunk into one array before
+calling `index.add()`. For the largest strategy that peaks at roughly:
+
+| Component | Size |
+|---|---|
+| 349,983 × 384 × 4 B float32 | 0.54 GB |
+| transient 2× at concatenation | 1.08 GB |
+| torch + MiniLM resident (MPS shares system RAM) | ~2.0 GB |
+| macOS baseline | ~3.0 GB |
+| **peak** | **~6.1 GB on an 8 GB machine** |
+
+That does not crash — macOS swaps — but swapping on a fanless machine compounds with
+thermal throttling and makes an overnight run unpredictable. `build_index` therefore
+changes to a streaming form:
+
+1. Embed a training sample (the first ~50,000 chunks) and call `index.train()` on it.
+   `IndexScalarQuantizer` requires training before adding, so the sample cannot be skipped.
+2. Embed the remaining chunks in batches, calling `index.add()` per batch and discarding
+   each batch's vectors.
+3. Write the index, the span-addressed chunk metadata, and the manifest as today.
+
+Peak memory becomes one batch of vectors rather than the whole corpus. This benefits the
+instance too, and is a prerequisite for step 1 of the implementation order rather than an
+optimization.
+
+### Sequence
+
+1. `scp` `data/corpus.jsonl` (38.6 MB) down from the instance. Do **not** re-run
+   `scripts/ingest_dataset.py` locally: the corpus must be byte-identical to the one the
+   measured findings and chunk counts were derived from, and re-ingesting also re-downloads
+   the source parquet unnecessarily.
+2. Build all indices locally on MPS, overnight.
+3. Verify locally: `scripts/evaluate_strategies.py` plus a manifest check on every index.
+4. Upload `data/` (~674 MB projected) to S3.
+5. Pull onto `i-09e157bfae9bb82a6`, restart the service, re-run the evaluation **on the
+   instance** and confirm the numbers match the local run before publishing the report.
+   The evaluation is needed for the report regardless, so this verification is free.
+6. `deploy/setup.sh` changes its index-bootstrap step from "build if missing" to "fetch
+   from S3 if missing, build only as fallback," so a fresh deploy no longer implies an
+   hour of embedding.
+
+Renting a `c7i.4xlarge` (~$1, ~10 min, 32 GB RAM, no thermal limit, and an S3 upload that
+never touches home bandwidth) remains the faster option and is the fallback if the local
+build proves unreliable. It is not chosen because local is free and now measured to work.
 
 ## Risks
 
@@ -366,6 +433,9 @@ as fallback," so a fresh deploy no longer implies an hour of embedding.
 | `semantic` retune changes an already-reported strategy's numbers | Intended. Both the old and retuned configurations are reported, so Finding 2 stays visible rather than being quietly corrected. |
 | `query_aware` posts an inflated, self-referential recall | The held-out variant is a required evaluation output, and the caveat is stated inline in the report. |
 | Parent-store refactor breaks the live service mid-window | Feature branch; both index generations are on disk simultaneously; the manifest check already refuses a mismatched index rather than serving nonsense. |
+| Local overnight build throttles or swaps on the fanless 8 GB M1 | `build_index` streams, capping peak at one batch instead of ~6.1 GB. Plan 65-90 min, not the 50 min burst figure. `c7i.4xlarge` is the fallback. |
+| ~674 MB upload from home bandwidth stalls | Upload to S3 with a resumable multipart client; `deploy/setup.sh` fetches from S3 rather than the laptop, so a failed upload never leaves the instance half-updated. |
+| Locally built artifacts unreadable on the instance | Verified end to end on 2026-08-21: bit-identical FAISS search across arm64→x86_64, pickle protocols 4 and 5 both load, numpy and faiss versions match. Re-verified by the post-transfer evaluation run. |
 | Chunk-count estimates for strategies 3, 4, 5, 8 prove wrong | They affect only build time and disk, both of which have wide headroom (11 GB free, ~674 MB projected). |
 | Ten strategies is too many to finish before Aug 22 | The implementation order below is a strict priority sequence; every prefix of it is a complete, honest submission. |
 
@@ -373,7 +443,9 @@ as fallback," so a fresh deploy no longer implies an hour of embedding.
 
 Strict priority. Any prefix ships.
 
-1. Registry (`app/strategies.py`) and parent store. Everything depends on it.
+1. Registry (`app/strategies.py`), parent store, and the streaming `build_index`.
+   Everything depends on these three; the streaming change is what makes the local
+   overnight build fit in 8 GB.
 2. `recursive`, `parent_child`, `query_aware`, `whole_passage`.
 3. Dedup-by-parent, and generation switched to `source_passage`.
 4. Build-time threshold calibration and the coupling test.
