@@ -20,6 +20,7 @@ from app.chunkers import (
     fixed_size_chunker,
     parent_child_chunker,
     query_aware_chunker,
+    query_aware_heldout_chunker,
     query_group_chunker,
     recursive_chunker,
     semantic_chunker,
@@ -38,6 +39,7 @@ __all__ = [
     "get",
     "names",
     "per_passage",
+    "served_names",
 ]
 
 
@@ -63,6 +65,10 @@ class Strategy:
     # expensive half of its work. Everything else chunks with string operations,
     # so the build counts first and shows a real percentage and ETA.
     chunking_embeds: bool = False
+    # False for measurement controls: indices built to answer a question about
+    # another strategy, which should not be offered as something to retrieve
+    # from. They are still built, calibrated and evaluated.
+    served: bool = True
 
 
 _REGISTRY: dict[str, Strategy] = {
@@ -136,6 +142,23 @@ _REGISTRY: dict[str, Strategy] = {
         ),
         chunker=query_aware_chunker,
     ),
+    "query_aware_heldout": Strategy(
+        name="query_aware_heldout",
+        kind="dense",
+        axis="enrichment",
+        description=(
+            "query_aware's control: identical, except the evaluated rows' "
+            "passages are embedded without their own query. Measures whether "
+            "query enrichment generalises to a question the index was not "
+            "built around, which searching the enriched index cannot."
+        ),
+        chunker=query_aware_heldout_chunker,
+        # A control, not a product. Its own off-topic threshold is not even
+        # meaningful: calibration samples different rows than the evaluation
+        # holds out, so most calibration queries still match their own enriched
+        # passages. Only its recall against the held-out queries is valid.
+        served=False,
+    ),
     "query_group": Strategy(
         name="query_group",
         kind="dense",
@@ -165,10 +188,16 @@ def names() -> tuple[str, ...]:
 def dense_names() -> tuple[str, ...]:
     """Strategies backed by their own index, i.e. the ones a build produces.
 
+    Includes measurement controls, which are built and evaluated but not served.
     Composed kinds (hybrid, fusion) are served by combining these at request
     time and have nothing of their own to build.
     """
     return tuple(n for n, s in _REGISTRY.items() if s.kind == "dense")
+
+
+def served_names() -> tuple[str, ...]:
+    """Strategies a request may retrieve from. Excludes measurement controls."""
+    return tuple(n for n, s in _REGISTRY.items() if s.served)
 
 
 def chunk_paths(name: str) -> tuple[str, str]:

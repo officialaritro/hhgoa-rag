@@ -163,12 +163,16 @@ def test_strategies_endpoint_lists_every_registered_strategy():
     """Derived from the registry, never hard-coded. Strategy identity used to be
     duplicated across four modules, and a strategy present in one but missing
     from another is how a miscalibrated threshold reached production."""
-    from app.strategies import dense_names
+    from app.strategies import dense_names, served_names
 
     response = client.get("/api/strategies")
     assert response.status_code == 200
     body = response.json()
-    assert set(body["strategies"]) == set(dense_names())
+    assert set(body["strategies"]) == set(served_names())
+    # Measurement controls are built and evaluated but must not be offered as
+    # something to retrieve from -- query_aware_heldout exists only to answer a
+    # question about query_aware, and its own threshold is not meaningful.
+    assert set(body["strategies"]) < set(dense_names())
     assert body["default"] in body["strategies"]
 
 

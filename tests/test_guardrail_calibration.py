@@ -99,7 +99,10 @@ def test_a_query_enriched_index_is_calibrated_on_held_out_queries():
     from app.strategies import get
 
     for name in _calibrated():
-        if get(name).axis != "enrichment":
+        strategy = get(name)
+        # Only the served enriched index. The control index is held out by
+        # construction rather than by a search-time filter, and is not served.
+        if strategy.axis != "enrichment" or not strategy.served:
             continue
         calibration = _manifest(name)["calibration"]
         assert calibration.get("held_out") is True, (

@@ -18,8 +18,11 @@ embedding bill.
 The two shipped strategies were the two extremes with nothing in between.
 """
 
+import json
 import re
 from collections.abc import Iterator
+from functools import cache
+from pathlib import Path
 
 from app.embeddings import cosine_similarity, embed_batch
 from app.passages import Chunk, Passage, per_passage
@@ -191,7 +194,47 @@ def _query_aware(passage: Passage, passage_id: int) -> Iterator[Chunk]:
     }
 
 
+HELDOUT_QUERY_IDS_PATH = "data/heldout_query_ids.json"
+
+
+@cache
+def _load_heldout_query_ids() -> frozenset[int]:
+    """Query ids whose passages must NOT be enriched with their own query.
+
+    Evaluating query_aware with the same query it was built from measures
+    self-reference: the passage's vector literally contains the query being
+    searched for. But the relevance labels for a query live in that query's own
+    corpus row, so excluding the row at search time makes recall structurally
+    impossible -- it removes the only passages that could count as hits.
+
+    The honest control is therefore an index, not a filter: build one where the
+    evaluated rows' passages carry no query, leave every other row enriched, and
+    search it with those same queries. That is exactly the production case of a
+    question the index was not built around.
+    """
+    path = Path(HELDOUT_QUERY_IDS_PATH)
+    if not path.exists():
+        return frozenset()
+    return frozenset(json.loads(path.read_text()))
+
+
+def _query_aware_heldout(passage: Passage, passage_id: int) -> Iterator[Chunk]:
+    """query_aware's control. Identical, except the evaluated rows go in bare."""
+    if not passage["text"]:
+        return
+    heldout = _load_heldout_query_ids()
+    chunk: Chunk = {
+        "parent_id": passage_id,
+        "start": 0,
+        "end": len(passage["text"]),
+    }
+    if passage["query_id"] not in heldout:
+        chunk["embed_query"] = True
+    yield chunk
+
+
 whole_passage_chunker = per_passage(_whole_passage)
+query_aware_heldout_chunker = per_passage(_query_aware_heldout)
 fixed_size_chunker = per_passage(_fixed_size)
 recursive_chunker = per_passage(_recursive)
 parent_child_chunker = per_passage(_parent_child)

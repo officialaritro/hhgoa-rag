@@ -149,9 +149,12 @@ def _phase_measure(write: bool) -> int:
 
         # A query-enriched index must be calibrated against held-out queries or
         # the threshold measures self-reference and refuses real traffic.
-        from app.strategies import get
 
-        held_out = get(name).axis == "enrichment"
+        # Only the enriched index needs a search-time exclusion. The control
+        # index (query_aware_heldout) is held out by construction -- its
+        # evaluated rows carry no query -- so filtering it as well would drop
+        # the very passages the measurement is about.
+        held_out = name == "query_aware"
         if held_out:
             import pickle
 

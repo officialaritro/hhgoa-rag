@@ -20,7 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from app.generation import generate_answer
 from app.guardrails import check_groundedness, check_off_topic, check_unsafe_input
 from app.retrieval import retrieve
-from app.strategies import dense_names, get
+from app.strategies import get, served_names
 from app.stt import transcribe
 
 logger = logging.getLogger("uvicorn.error")
@@ -28,7 +28,7 @@ logger = logging.getLogger("uvicorn.error")
 # Derived from the registry rather than restated. Strategy identity used to live
 # in four places; a strategy present in one and missing from another is exactly
 # how a threshold calibrated against one index shipped as another's default.
-_STRATEGIES = dense_names()
+_STRATEGIES = served_names()
 
 # fixed_size carries the lowest measured false-refusal rate of the two
 # originally calibrated strategies (4.5% against semantic's 8.0%), so it stays
