@@ -77,6 +77,11 @@ _DEFAULT_GROUNDEDNESS_THRESHOLD = _threshold("GROUNDEDNESS_SIMILARITY_THRESHOLD"
 # not an exhaustive safety classifier. Env-overridable is left for Task 9
 # retuning; the list itself is a plain module constant since it is not a
 # single scalar.
+#
+# Hate speech is deliberately not covered here: matching it reliably needs a
+# slur list, and a slur list does not belong in this repo's source -- that
+# category needs a hosted classifier, which the "no second LLM call for
+# guardrails" constraint above already rules out for this MVP.
 _UNSAFE_PATTERNS = [
     re.compile(pattern, re.IGNORECASE)
     for pattern in [
@@ -85,6 +90,8 @@ _UNSAFE_PATTERNS = [
         r"\bkill (myself|someone)\b",
         r"\bmake a weapon\b",
         r"\bhow to (make|build) (a )?(bomb|explosive|weapon)\b",
+        r"\b(synthesize|make|cook) (methamphetamine|meth|crystal meth|cocaine|heroin)\b",
+        r"\b(home address|phone number|personal information) (of|for)\b",
     ]
 ]
 
