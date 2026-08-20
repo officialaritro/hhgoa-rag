@@ -365,11 +365,22 @@ read back on x86_64 Linux / Python 3.12.3 / numpy 2.5.2 / faiss 1.15.0:
 - FAISS search results are **bit-identical** across the two architectures.
 - Pickle protocols 4 and 5 both load on the instance (its `HIGHEST_PROTOCOL` is 5, so the
   local 3.14 default of protocol 5 is safe). `.npy` span arrays load unchanged.
-  Local Python stays at the `.python-version` 3.14 — no downgrade to match the instance's
-  3.12 is needed, and `.github/workflows/ci.yml` already tests both deliberately. As
-  belt-and-braces, metadata pickles are written with an **explicit** `protocol=4` rather
-  than the interpreter default, so the artifact does not silently change if either side's
-  Python moves. Bulk span data uses `.npy`, which is protocol-independent.
+  Even so, **local Python is pinned down from 3.14 to 3.12 to match the instance**, and
+  `.python-version` is changed accordingly. The pickle question was never the reason: the
+  reason is that 3.12 is what ships, so a green local test run should prove the deploy
+  target works, and the index build now happens locally — building artifacts on a
+  different interpreter than the one serving them is a variable worth deleting rather
+  than verifying. `uv sync --locked --python 3.12` resolves the identical lock (torch
+  2.13.0 included) and CI has passed on 3.12 continuously, so the switch carries no
+  dependency risk. `.github/workflows/ci.yml` keeps testing both versions: `pyproject.toml`
+  declares `requires-python = ">=3.12"`, so the matrix now covers that declared contract
+  as a forward-compatibility canary instead of papering over a local/production split.
+  Upgrading the *instance* to 3.14 was rejected as the wrong direction — swapping the
+  production interpreter under a live demo days before a no-resubmission deadline trades
+  real risk for a cosmetic gain. Metadata pickles are additionally written with an
+  **explicit** `protocol=4` rather than the interpreter default, so the artifact cannot
+  silently change if either side's Python moves again. Bulk span data uses `.npy`, which
+  is protocol-independent.
 - numpy and faiss versions match exactly on both sides, so no version skew to manage.
 
 **MPS-versus-CPU numerics are verified.** The index is built from MPS-computed vectors
