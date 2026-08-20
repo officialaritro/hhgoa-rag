@@ -9,8 +9,11 @@ scripts/tune_thresholds.py before changing one, and check the change against
 tests/test_guardrail_calibration.py, which pins the false-refusal budget.
 """
 
+import json
 import os
 import re
+from functools import cache
+from pathlib import Path
 
 from pydantic import BaseModel
 
@@ -58,10 +61,67 @@ def _threshold(env_var: str, default: float) -> float:
 # Mean-of-top-5 was measured as an alternative signal and rejected: at matched
 # leak rates it refused 2.0% vs 4.5% of real questions on fixed_size but 10%
 # vs 8.0% on semantic -- no consistent gain for a second signal to maintain.
-_DEFAULT_OFFTOPIC_THRESHOLDS = {
-    "fixed_size": _threshold("OFFTOPIC_SIMILARITY_THRESHOLD_FIXED_SIZE", 0.55),
-    "semantic": _threshold("OFFTOPIC_SIMILARITY_THRESHOLD_SEMANTIC", 0.60),
-}
+#
+# The thresholds themselves are no longer listed here. They are measured per
+# index at build time and written into that index's manifest, because a
+# hand-maintained dict is what produced the original defect: a value verified
+# against the semantic index shipped as the fixed_size default. Two strategies
+# made that a coin flip; eight would make it eight chances to forget one, and
+# forgetting one is silent. See scripts/calibrate_thresholds.py and
+# `offtopic_threshold` below.
+
+
+class MissingCalibration(RuntimeError):
+    """An index was built but never calibrated, and something tried to serve it.
+
+    Raised rather than falling back to another strategy's threshold. The whole
+    reason thresholds are per-strategy is that the score scales are not
+    interchangeable -- semantic chunks are shorter, so every cosine runs higher
+    (in-corpus median 0.779 against 0.741) -- so borrowing a number silently
+    reintroduces the original bug.
+    """
+
+
+@cache
+def offtopic_threshold(strategy: str, index_path: str | None = None) -> float:
+    """The measured off-topic threshold for one strategy's index.
+
+    Read from the manifest the build wrote, so a strategy cannot reach the
+    serving path with an unmeasured threshold. An explicit environment variable
+    still wins, which keeps retuning-without-a-rebuild available as documented.
+
+    Cached: this is on the request path and must not stat and parse JSON per
+    query.
+    """
+    override = os.environ.get(
+        f"OFFTOPIC_SIMILARITY_THRESHOLD_{strategy.upper()}", ""
+    ).strip()
+    if override:
+        try:
+            return float(override)
+        except ValueError:
+            pass
+
+    if index_path is None:
+        from app.strategies import chunk_paths
+
+        index_path = chunk_paths(strategy)[0]
+    manifest = Path(index_path).with_suffix(".manifest.json")
+    if not manifest.exists():
+        raise MissingCalibration(
+            f"no manifest for strategy {strategy!r} at {manifest}; "
+            f"build and calibrate it before serving "
+            f"(python -m scripts.build_all && python -m scripts.calibrate_thresholds)"
+        )
+    recorded = json.loads(manifest.read_text()).get("offtopic_threshold")
+    if recorded is None:
+        raise MissingCalibration(
+            f"index for strategy {strategy!r} has no measured off-topic threshold. "
+            f"Serving it would have to borrow another index's number, which is the "
+            f"defect this replaces. Run: python -m scripts.calibrate_thresholds"
+        )
+    return float(recorded)
+
 
 # Real generated answers score 0.756-0.902 against their retrieved context;
 # answers paired with unrelated context score below 0.11. 0.40 clears the
@@ -126,13 +186,7 @@ def check_off_topic(
     borrowing another index's threshold would reintroduce the original bug.
     """
     if threshold is None:
-        if strategy not in _DEFAULT_OFFTOPIC_THRESHOLDS:
-            raise ValueError(
-                f"no measured off-topic threshold for strategy {strategy!r}; "
-                f"measured strategies are "
-                f"{sorted(_DEFAULT_OFFTOPIC_THRESHOLDS)}"
-            )
-        threshold = _DEFAULT_OFFTOPIC_THRESHOLDS[strategy]
+        threshold = offtopic_threshold(strategy)
     if top_similarity_score < threshold:
         return GuardrailResult(passed=False, reason="off-topic")
     return GuardrailResult(passed=True)

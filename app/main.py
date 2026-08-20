@@ -20,12 +20,32 @@ from fastapi.staticfiles import StaticFiles
 from app.generation import generate_answer
 from app.guardrails import check_groundedness, check_off_topic, check_unsafe_input
 from app.retrieval import retrieve
+from app.strategies import dense_names, get
 from app.stt import transcribe
 
 logger = logging.getLogger("uvicorn.error")
 
+# Derived from the registry rather than restated. Strategy identity used to live
+# in four places; a strategy present in one and missing from another is exactly
+# how a threshold calibrated against one index shipped as another's default.
+_STRATEGIES = dense_names()
+
+# fixed_size carries the lowest measured false-refusal rate of the two
+# originally calibrated strategies (4.5% against semantic's 8.0%), so it stays
+# the default until the evaluation matrix gives a better-evidenced answer.
 _DEFAULT_STRATEGY = "fixed_size"
-_STRATEGIES = ("fixed_size", "semantic")
+
+# /api/compare fans out one transcript across several strategies concurrently,
+# and every strategy in the fan-out costs its own generation call. Comparing all
+# eight would issue eight Claude calls per request, so the default is one
+# strategy per axis: the do-nothing baseline, corrected splitting, a widened
+# return unit, and query enrichment. Callers can override with ?strategies=.
+COMPARE_DEFAULT = ("fixed_size", "recursive", "sentence_window", "query_aware")
+
+# Only the default is warmed at startup. The rest load on first use via the
+# cache in app/retrieval.py -- warming all eight would read 483 MB of indices
+# and unpickle every span store before the service reports ready.
+_WARM_AT_STARTUP = (_DEFAULT_STRATEGY,)
 
 # Set True once both indices and the embedding model load and answer a
 # warm-up query successfully. False means /health reports not-ready instead
@@ -38,7 +58,7 @@ _ready = False
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     global _ready
     try:
-        for strategy in _STRATEGIES:
+        for strategy in _WARM_AT_STARTUP:
             retrieve(query="warmup", strategy=strategy, k=1)
         _ready = True
         logger.info("startup: indices loaded, service ready")
@@ -272,7 +292,14 @@ async def _run_strategy_pipeline_safe(transcript: str, strategy: str) -> dict[st
 
 
 @app.post("/api/compare")
-async def compare(request: Request) -> JSONResponse:
+async def compare(
+    request: Request,
+    strategies_param: str = Query(
+        ",".join(COMPARE_DEFAULT),
+        alias="strategies",
+        description="Comma-separated strategies to compare side by side.",
+    ),
+) -> JSONResponse:
     """Voice question in -> both chunking strategies answered from the same
     transcription, concurrently. Exists so a side-by-side comparison never
     has to transcribe the same audio twice (extra STT latency/cost, and a
@@ -280,6 +307,19 @@ async def compare(request: Request) -> JSONResponse:
     question)."""
     start = time.perf_counter()
     shared_stages: dict[str, float] = {}
+
+    compared = tuple(s.strip() for s in strategies_param.split(",") if s.strip())
+    unknown = [s for s in compared if s not in _STRATEGIES]
+    if not compared or unknown:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": f"unknown strategies {unknown}"
+                if unknown
+                else "no strategies",
+                "valid_strategies": list(_STRATEGIES),
+            },
+        )
 
     audio_bytes = await request.body()
 
@@ -324,7 +364,7 @@ async def compare(request: Request) -> JSONResponse:
         )
 
     strategy_results = await asyncio.gather(
-        *(_run_strategy_pipeline_safe(transcript, s) for s in _STRATEGIES)
+        *(_run_strategy_pipeline_safe(transcript, s) for s in compared)
     )
 
     return JSONResponse(
@@ -333,16 +373,35 @@ async def compare(request: Request) -> JSONResponse:
             "latency_ms": _elapsed_ms(start),
             "shared_stages_ms": shared_stages,
             "refusal_reason": None,
-            "results": dict(zip(_STRATEGIES, strategy_results)),
+            "results": dict(zip(compared, strategy_results)),
         }
     )
 
 
 @app.get("/api/strategies")
 def strategies() -> JSONResponse:
-    """Chunking strategies available to retrieve from. Both indices are built;
-    the frontend uses this to offer a choice rather than hard-coding one."""
-    return JSONResponse({"strategies": list(_STRATEGIES), "default": _DEFAULT_STRATEGY})
+    """Chunking strategies available to retrieve from, with what each one does.
+
+    The frontend reads this rather than hard-coding names. Eight bare strategy
+    names mean nothing in a radio group, and the registry already carries a
+    description and the axis each strategy varies, so they are served here
+    rather than restated in the UI.
+    """
+    return JSONResponse(
+        {
+            "strategies": list(_STRATEGIES),
+            "default": _DEFAULT_STRATEGY,
+            "compare_default": list(COMPARE_DEFAULT),
+            "details": {
+                name: {
+                    "description": get(name).description,
+                    "axis": get(name).axis,
+                    "kind": get(name).kind,
+                }
+                for name in _STRATEGIES
+            },
+        }
+    )
 
 
 def _elapsed_ms(start: float) -> float:

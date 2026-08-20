@@ -1,276 +1,137 @@
-"""Pins the off-topic guard's calibration to measured score distributions.
+"""Pins the off-topic guard's calibration to what the build actually measured.
 
-Every other guardrail test either mocks `check_off_topic` outright or passes an
-explicit `threshold=`, so none of them exercise the value the service actually
-ships. That is how a threshold refusing 38.5% of real in-corpus questions
-passed a green suite and reached the live service: the constant was verified by
-hand against the *semantic* index and shipped against a `fixed_size` default.
+History this exists to prevent. Every other guardrail test either mocks
+`check_off_topic` outright or passes an explicit `threshold=`, so none of them
+exercise the value the service ships. That is how a threshold refusing 38.5% of
+real in-corpus questions reached the live service: the constant was verified by
+hand against the *semantic* index and shipped as the `fixed_size` default.
 
-The numbers below are recorded measurements, not live ones -- they are the
-output of a probe over the built indices on 2026-08-19 (200 corpus queries
-sampled with seed 0, plus 7 off-topic probes, top-1 retrieval similarity).
-Re-measure with scripts/tune_thresholds.py, or the probe it descends from, and
-update these tables in the same commit as any threshold change.
+The fix is structural rather than a better constant. Thresholds are measured per
+index at build time and written into that index's manifest
+(scripts/calibrate_thresholds.py), and `offtopic_threshold` raises
+`MissingCalibration` rather than borrowing another strategy's number. So these
+tests read the manifests instead of restating measurements, which is what keeps
+them from going stale: the previous version of this file pinned six semantic
+scores that became fiction the moment the semantic threshold was retuned, while
+every assertion kept passing.
+
+These tests skip when `data/` is unpopulated, which is the case in CI.
 """
+
+import json
+from pathlib import Path
 
 import pytest
 
-from app.guardrails import _DEFAULT_OFFTOPIC_THRESHOLDS, check_off_topic
-
-# Share of the 200 sampled in-corpus queries that each candidate threshold
-# would refuse. Monotonically increasing, so a threshold between two keys is
-# bounded above by the higher key's rate.
-MEASURED_FALSE_REFUSAL_RATE = {
-    "fixed_size": {
-        0.30: 0.000,
-        0.35: 0.000,
-        0.40: 0.005,
-        0.45: 0.015,
-        0.50: 0.020,
-        0.55: 0.045,
-        0.60: 0.125,
-        0.65: 0.245,
-        0.70: 0.385,
-    },
-    "semantic": {
-        0.30: 0.000,
-        0.35: 0.000,
-        0.40: 0.000,
-        0.45: 0.000,
-        0.50: 0.010,
-        0.55: 0.030,
-        0.60: 0.080,
-        0.65: 0.170,
-        0.70: 0.290,
-    },
-}
+from app.guardrails import MissingCalibration, check_off_topic, offtopic_threshold
+from app.strategies import chunk_paths, dense_names
 
 # A refusal on a real question is the damaging, user-visible failure, and the
-# pipeline has a second line of defence for off-topic input that gets through
-# (the generation prompt declines when the passages do not answer, and the
-# groundedness guard then refuses that answer). So the budget is set on false
-# refusals, deliberately tighter than on leaks.
+# pipeline has two further lines of defence for off-topic input that gets
+# through: the generation prompt returns a decline sentinel when the passages do
+# not answer, and the groundedness guard refuses ungrounded answers. So the
+# budget is set on false refusals, deliberately tighter than on leaks.
 MAX_FALSE_REFUSAL_RATE = 0.10
 
-# Off-topic probes, top-1 similarity per index. "Clearly unrelated" is the
-# wording TS-002 actually grades against.
-CLEARLY_UNRELATED_SCORES = {
-    "fixed_size": {
-        "what is my bank account password": 0.612,
-        "sing me a lullaby in Portuguese": 0.454,
-        "what am I thinking about right now": 0.386,
-        "book me a flight to Reykjavik tomorrow morning": 0.529,
-        "qwertyuiop asdfghjkl zxcvbnm": 0.389,
-        "please delete all my files": 0.445,
-    },
-    "semantic": {
-        "what is my bank account password": 0.743,
-        "sing me a lullaby in Portuguese": 0.559,
-        "what am I thinking about right now": 0.534,
-        "book me a flight to Reykjavik tomorrow morning": 0.551,
-        "qwertyuiop asdfghjkl zxcvbnm": 0.499,
-        "please delete all my files": 0.590,
-    },
-}
 
-# The one clearly-unrelated probe no similarity threshold can catch. An MS
-# MARCO web-search corpus genuinely contains bank-account and password
-# passages, so retrieval is behaving correctly -- the question's topic is
-# in-corpus even though its answer cannot be. Refusing it by raising the
-# threshold costs a quarter of all real questions. It is refused later instead,
-# by the generation prompt and the groundedness guard.
-KNOWN_UNCATCHABLE_BY_SIMILARITY = "what is my bank account password"
-
-# The regression that exposed all of this: a question whose query is in the
-# corpus verbatim (")what was the immediate impact of the success of the
-# manhattan project?"), refused as off-topic on the live service.
-IN_CORPUS_QUESTION_SCORES = {"fixed_size": 0.687, "semantic": 0.828}
-
-STRATEGIES = sorted(MEASURED_FALSE_REFUSAL_RATE)
+def _manifest(strategy: str) -> dict:
+    index_path, _ = chunk_paths(strategy)
+    path = Path(index_path).with_suffix(".manifest.json")
+    if not path.exists():
+        pytest.skip(f"{path} not built; run scripts.build_all")
+    return json.loads(path.read_text())
 
 
-def _measured_refusal_ceiling(strategy: str, threshold: float) -> float:
-    """Upper bound on the false-refusal rate at `threshold`, from the recorded
-    curve. Uses the next measured point at or above it, so an unmeasured value
-    is judged conservatively rather than silently passing."""
-    curve = MEASURED_FALSE_REFUSAL_RATE[strategy]
-    at_or_above = [t for t in sorted(curve) if t >= threshold]
-    if not at_or_above:
-        pytest.fail(
-            f"{strategy} threshold {threshold} is above every measured point "
-            f"({max(curve)}); re-measure before raising it this far"
+def _calibrated() -> list[str]:
+    built = []
+    for name in dense_names():
+        index_path, _ = chunk_paths(name)
+        if Path(index_path).with_suffix(".manifest.json").exists():
+            built.append(name)
+    if not built:
+        pytest.skip("no indices built; run scripts.build_all")
+    return built
+
+
+@pytest.mark.parametrize("strategy", dense_names())
+def test_every_served_strategy_carries_a_measured_threshold(strategy):
+    """The coupling that matters. A strategy `/api/ask` will retrieve from and
+    whose index was never calibrated must not be servable at all."""
+    manifest = _manifest(strategy)
+
+    assert "offtopic_threshold" in manifest, (
+        f"{strategy} has an index but no measured threshold; "
+        f"run scripts.calibrate_thresholds"
+    )
+    assert 0.0 < manifest["offtopic_threshold"] < 1.0
+
+
+@pytest.mark.parametrize("strategy", dense_names())
+def test_each_threshold_stays_within_the_false_refusal_budget(strategy):
+    manifest = _manifest(strategy)
+    rate = manifest["calibration"]["false_refusal_rate"]
+
+    assert rate <= MAX_FALSE_REFUSAL_RATE, (
+        f"{strategy} refuses {rate:.1%} of real in-corpus questions, over the "
+        f"{MAX_FALSE_REFUSAL_RATE:.0%} budget"
+    )
+
+
+def test_thresholds_are_not_all_the_same_number():
+    """The original defect in one assertion. The indices sit on different score
+    scales -- shorter chunks make every cosine run higher -- so a single shared
+    value is miscalibrated for all but one of them."""
+    thresholds = {s: _manifest(s)["offtopic_threshold"] for s in _calibrated()}
+
+    assert len(set(thresholds.values())) > 1, (
+        f"every strategy got the identical threshold {thresholds}, which means "
+        f"they were not measured per index"
+    )
+
+
+def test_a_query_enriched_index_is_calibrated_on_held_out_queries():
+    """query_aware bakes each passage's own gold query into its vector, so an
+    in-corpus query matches its own row almost perfectly. Calibrated naively it
+    measured 0.722 with zero leaks and looked like the best strategy in the
+    slate; held out it measures 0.400 with 5 of 8 probes leaking, the worst.
+    A threshold from the naive measurement would refuse most real traffic.
+    """
+    from app.strategies import get
+
+    for name in _calibrated():
+        if get(name).axis != "enrichment":
+            continue
+        calibration = _manifest(name)["calibration"]
+        assert calibration.get("held_out") is True, (
+            f"{name} varies the embedded text using its own query, so its "
+            f"threshold must be measured with that query's row excluded"
         )
-    return curve[at_or_above[0]]
 
 
-@pytest.mark.unit
-@pytest.mark.parametrize("strategy", STRATEGIES)
-def test_shipped_threshold_stays_within_the_false_refusal_budget(strategy):
-    threshold = _DEFAULT_OFFTOPIC_THRESHOLDS[strategy]
-    ceiling = _measured_refusal_ceiling(strategy, threshold)
+@pytest.mark.parametrize("strategy", dense_names())
+def test_the_shipped_threshold_is_what_the_guard_actually_uses(strategy):
+    """Closes the gap that let the original bug through: every other guardrail
+    test passes an explicit threshold, so none of them touch the shipped value."""
+    manifest = _manifest(strategy)
+    offtopic_threshold.cache_clear()
+    try:
+        effective = offtopic_threshold(strategy)
+    finally:
+        offtopic_threshold.cache_clear()
 
-    assert ceiling <= MAX_FALSE_REFUSAL_RATE, (
-        f"{strategy} off-topic threshold {threshold} refuses up to "
-        f"{ceiling:.1%} of real in-corpus questions, over the "
-        f"{MAX_FALSE_REFUSAL_RATE:.0%} budget. If that is intended, re-measure "
-        f"and update MEASURED_FALSE_REFUSAL_RATE in the same commit."
-    )
+    assert effective == pytest.approx(manifest["offtopic_threshold"])
 
-
-@pytest.mark.unit
-@pytest.mark.parametrize("strategy", STRATEGIES)
-def test_shipped_threshold_answers_a_verbatim_corpus_question(strategy):
-    """The original bug, as a test: 0.687 on fixed_size failed the 0.70 gate."""
-    result = check_off_topic(
-        top_similarity_score=IN_CORPUS_QUESTION_SCORES[strategy], strategy=strategy
-    )
-
-    assert result.passed is True, (
-        f"a question whose query is in the corpus verbatim scores "
-        f"{IN_CORPUS_QUESTION_SCORES[strategy]} on {strategy} and would be "
-        f"refused as off-topic by threshold "
-        f"{_DEFAULT_OFFTOPIC_THRESHOLDS[strategy]}"
-    )
+    just_under = effective - 0.01
+    just_over = effective + 0.01
+    assert check_off_topic(just_under, strategy=strategy).passed is False
+    assert check_off_topic(just_over, strategy=strategy).passed is True
+    offtopic_threshold.cache_clear()
 
 
-@pytest.mark.unit
-@pytest.mark.parametrize("strategy", STRATEGIES)
-def test_shipped_threshold_refuses_clearly_unrelated_questions(strategy):
-    """TS-002 grades on questions "clearly unrelated" to the corpus."""
-    leaked = [
-        query
-        for query, score in CLEARLY_UNRELATED_SCORES[strategy].items()
-        if check_off_topic(top_similarity_score=score, strategy=strategy).passed
-    ]
-
-    assert leaked == [KNOWN_UNCATCHABLE_BY_SIMILARITY], (
-        f"{strategy}: clearly-unrelated questions reaching generation changed. "
-        f"Expected only {KNOWN_UNCATCHABLE_BY_SIMILARITY!r}, got {leaked}. "
-        f"Widening this set weakens TS-002; narrowing it means the threshold "
-        f"rose and the false-refusal budget above needs re-checking."
-    )
-
-
-@pytest.mark.unit
-def test_the_two_indices_are_not_calibrated_to_a_shared_threshold():
-    """Semantic chunks are shorter, so every cosine runs higher on that index.
-    A shared value is necessarily wrong for one of them -- the bug this file
-    exists to prevent -- so the thresholds must stay distinct and ordered."""
-    assert (
-        _DEFAULT_OFFTOPIC_THRESHOLDS["semantic"]
-        > _DEFAULT_OFFTOPIC_THRESHOLDS["fixed_size"]
-    ), (
-        "the semantic index scores higher on both in-corpus and off-topic "
-        "queries (in-corpus median 0.779 vs 0.741, top off-topic probe 0.743 "
-        "vs 0.612), so its threshold cannot be at or below fixed_size's"
-    )
-
-
-@pytest.mark.unit
-def test_every_served_strategy_has_a_measured_threshold():
-    """The API's strategy list and this table must not drift apart. A strategy
-    served without a measured threshold raises inside the guard at request
-    time, turning a missing measurement into a 500 on a live query."""
-    from app.main import _STRATEGIES
-
-    assert set(_STRATEGIES) == set(_DEFAULT_OFFTOPIC_THRESHOLDS), (
-        "every strategy /api/ask will retrieve from needs its own measured "
-        "off-topic threshold; measure the new index before serving it"
-    )
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize("strategy", STRATEGIES)
-def test_the_accepted_leak_is_caught_by_the_unsafe_guard_instead(strategy):
-    """The leak above is only acceptable because something else rejects it.
-
-    That justification was wrong once already: the groundedness guard was
-    assumed to catch whatever cleared this gate, but a model decline quotes the
-    passages and scores 0.533/0.795 against a 0.40 threshold, so it passed as
-    an answer. The claim is now pinned to the guard that actually fires.
-    """
-    from app.guardrails import check_unsafe_input
-
-    assert check_unsafe_input(KNOWN_UNCATCHABLE_BY_SIMILARITY).passed is False, (
-        f"{KNOWN_UNCATCHABLE_BY_SIMILARITY!r} clears the {strategy} off-topic "
-        f"gate at {CLEARLY_UNRELATED_SCORES[strategy][KNOWN_UNCATCHABLE_BY_SIMILARITY]} "
-        f"and must therefore be refused by the unsafe-input guard instead"
-    )
-
-
-# The chunker configuration each table above was measured against. A calibration
-# number only describes the index it was measured on, and changing a chunker
-# changes the index -- so these are a tripwire, not documentation.
-CALIBRATED_AGAINST = {
-    "fixed_size": {"chars": 700, "overlap": 0.2},
-    "semantic": {"threshold": 0.8},
-}
-
-# Calibrations known to no longer describe the chunker that would be built now.
-# Entries here are still valid for the *deployed* index, which is why the live
-# service is unaffected, but they must be re-measured before the rebuilt index
-# is served. app/chunkers.py SEMANTIC_THRESHOLD moved 0.8 -> 0.40 after the
-# adjacent-sentence distribution was measured (median 0.407); at 0.8 the chunker
-# merged 4.6% of pairs, at 0.40 it merges 51.1%, so chunk count drops from
-# 338,544 to roughly 172,000 and every semantic score above shifts with it.
-STALE_CALIBRATION = {
-    "semantic": (
-        "SEMANTIC_THRESHOLD moved 0.8 -> 0.40 (measured median 0.407). "
-        "Re-measure the semantic tables against the rebuilt index before "
-        "serving it. Tracked as the build-time calibration work in "
-        "docs/prd/2026-08-20-chunking-strategy-expansion.md section E."
-    ),
-}
-
-
-def test_a_changed_chunker_marks_its_calibration_stale():
-    """Guards the failure mode the calibration tables are most exposed to: a
-    chunker is retuned, the index changes underneath the recorded numbers, and
-    every assertion above keeps passing while describing an index that no
-    longer exists.
-
-    This does not demand the numbers be current -- it demands that a mismatch
-    be *declared*. Silence is the bug.
-    """
-    from app.chunkers import (
-        FIXED_SIZE_CHARS,
-        FIXED_SIZE_OVERLAP,
-        SEMANTIC_THRESHOLD,
-    )
-
-    live = {
-        "fixed_size": {"chars": FIXED_SIZE_CHARS, "overlap": FIXED_SIZE_OVERLAP},
-        "semantic": {"threshold": SEMANTIC_THRESHOLD},
-    }
-    for strategy, measured_config in CALIBRATED_AGAINST.items():
-        if live[strategy] != measured_config:
-            assert strategy in STALE_CALIBRATION, (
-                f"{strategy}'s chunker changed from {measured_config} to "
-                f"{live[strategy]}, so its calibration tables no longer describe "
-                f"the index that would be built. Either re-measure them or record "
-                f"the mismatch in STALE_CALIBRATION."
-            )
-        else:
-            assert strategy not in STALE_CALIBRATION, (
-                f"{strategy} is marked stale but its chunker config matches what "
-                f"was measured; remove the stale marker."
-            )
-
-
-def test_no_strategy_is_served_on_a_stale_calibration_after_migration():
-    """The actual danger is serving a rebuilt index against numbers measured on
-    the old one. Rebuilding is harmless; serving is not.
-
-    `semantic` is deliberately exempt while the deployed index still predates
-    the retune -- the live service is calibrated correctly for what it holds.
-    This test starts biting the moment retrieval migrates to the new span
-    format, which is when the rebuilt index becomes the served one.
-    """
-    from app.retrieval import INDEX_PATHS
-
-    migrated = set(INDEX_PATHS) - {"fixed_size", "semantic"}
-    for strategy in migrated:
-        assert strategy not in STALE_CALIBRATION, (
-            f"{strategy} is served but its calibration is stale: "
-            f"{STALE_CALIBRATION.get(strategy)}"
-        )
+def test_an_uncalibrated_strategy_cannot_be_served():
+    """The structural guarantee. Without it, a newly added strategy silently
+    borrows whatever number happens to be lying around."""
+    offtopic_threshold.cache_clear()
+    with pytest.raises(MissingCalibration):
+        offtopic_threshold("a_strategy_that_was_never_built")
+    offtopic_threshold.cache_clear()
