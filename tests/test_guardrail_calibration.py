@@ -177,3 +177,22 @@ def test_every_served_strategy_has_a_measured_threshold():
         "every strategy /api/ask will retrieve from needs its own measured "
         "off-topic threshold; measure the new index before serving it"
     )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("strategy", STRATEGIES)
+def test_the_accepted_leak_is_caught_by_the_unsafe_guard_instead(strategy):
+    """The leak above is only acceptable because something else rejects it.
+
+    That justification was wrong once already: the groundedness guard was
+    assumed to catch whatever cleared this gate, but a model decline quotes the
+    passages and scores 0.533/0.795 against a 0.40 threshold, so it passed as
+    an answer. The claim is now pinned to the guard that actually fires.
+    """
+    from app.guardrails import check_unsafe_input
+
+    assert check_unsafe_input(KNOWN_UNCATCHABLE_BY_SIMILARITY).passed is False, (
+        f"{KNOWN_UNCATCHABLE_BY_SIMILARITY!r} clears the {strategy} off-topic "
+        f"gate at {CLEARLY_UNRELATED_SCORES[strategy][KNOWN_UNCATCHABLE_BY_SIMILARITY]} "
+        f"and must therefore be refused by the unsafe-input guard instead"
+    )

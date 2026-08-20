@@ -35,3 +35,9 @@ class GenerationInput(BaseModel):
 
 class GenerationOutput(BaseModel):
     answer: str
+    # True when the model reported it could not answer from the passages. This
+    # is carried as a flag rather than inferred from the answer text later,
+    # because a decline is indistinguishable from an answer by similarity: the
+    # model quotes the passages to explain itself, so its refusal scores as
+    # grounded (measured 0.533-0.795 against context, threshold 0.40).
+    insufficient_context: bool = False

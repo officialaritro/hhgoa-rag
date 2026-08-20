@@ -92,6 +92,17 @@ _UNSAFE_PATTERNS = [
         r"\bhow to (make|build) (a )?(bomb|explosive|weapon)\b",
         r"\b(synthesize|make|cook) (methamphetamine|meth|crystal meth|cocaine|heroin)\b",
         r"\b(home address|phone number|personal information) (of|for)\b",
+        # Credential requests. Deliberately anchored on "what is my <secret>"
+        # rather than a bare mention of "password": the corpus is web-search
+        # queries, so legitimate questions like "how do I change my bank
+        # password" must still be answered. Measured over all 10,000 corpus
+        # queries, this pattern matches none of them.
+        #
+        # This is also the one off-topic query no similarity threshold can
+        # reject -- an MS MARCO corpus genuinely contains bank-and-password
+        # passages, so it scores 0.612/0.743 and clears the off-topic gate.
+        # Catching it here refuses it pre-retrieval instead, for free.
+        r"\bwhat (is|are) my\b.*\b(password|passcode|pin|ssn|social security number)\b",
     ]
 ]
 

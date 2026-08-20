@@ -25,3 +25,6 @@ data/
 
 # macOS AppleDouble metadata (created by tar/scp from a Mac)
 ._*
+
+# Build logs
+logs/

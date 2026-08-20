@@ -441,3 +441,45 @@ def test_compare_isolates_a_failing_strategy_branch(
     assert body["results"]["fixed_size"]["answer"] == "x is y"
     assert body["results"]["semantic"]["answer"] is None
     assert body["results"]["semantic"]["refusal_reason"] == "internal error"
+
+
+@patch("app.main.check_groundedness")
+@patch("app.main.generate_answer")
+@patch("app.main.check_off_topic")
+@patch("app.main.check_unsafe_input")
+@patch("app.main.retrieve")
+@patch("app.main.transcribe")
+def test_ask_refuses_when_the_model_declines_to_answer(
+    mock_transcribe,
+    mock_retrieve,
+    mock_unsafe,
+    mock_offtopic,
+    mock_generate,
+    mock_grounded,
+):
+    """A decline must surface as a refusal, not as an answer.
+
+    The groundedness guard cannot be relied on to catch it: a decline quotes
+    the passages to explain itself and scores 0.533-0.795 against context on
+    the live indices, well above the 0.40 threshold, so it passed as grounded
+    and reached the user as an answer with refusal_reason null.
+    """
+    mock_transcribe.return_value = StageResult(
+        ok=True, value=STTOutput(transcript="something the passages do not cover")
+    )
+    mock_unsafe.return_value.passed = True
+    mock_retrieve.return_value = _ok_retrieval()
+    mock_offtopic.return_value.passed = True
+    mock_generate.return_value = StageResult(
+        ok=True,
+        value=GenerationOutput(answer="INSUFFICIENT_CONTEXT", insufficient_context=True),
+    )
+
+    body = client.post("/api/ask", content=b"audio").json()
+
+    assert body["answer"] is None
+    assert body["refusal_reason"] == "not in the retrieved passages"
+    assert body["top_score"] == 0.9
+    # The decline short-circuits before groundedness -- scoring a refusal
+    # against the context is the check that cannot tell them apart.
+    mock_grounded.assert_not_called()
