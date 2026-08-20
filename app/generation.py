@@ -13,13 +13,27 @@ from app.schemas import GenerationOutput, RetrievalOutput
 
 _MAX_TOKENS = 512
 
+# Sentinel the model returns instead of prose when it cannot answer.
+#
+# Asking it to "say so explicitly" was not enough. The guardrail after
+# generation scores the answer against the retrieved context, and a spoken
+# decline *quotes the passages* to explain itself, so it scores as well as a
+# real answer: measured on the live indices, declines scored 0.533 (fixed_size)
+# and 0.795 (semantic) against a 0.40 threshold. Every one passed as grounded
+# and reached the user as an answer carrying no refusal reason.
+#
+# A fixed token is checkable without a second LLM call (plan Global
+# Constraints) and cannot be mistaken for an answer the way prose can.
+INSUFFICIENT_CONTEXT = "INSUFFICIENT_CONTEXT"
+
 _SYSTEM_PROMPT = (
     "Answer the user's question using ONLY the passages provided below. "
     "Do not use outside knowledge. If the passages do not contain enough "
-    "information to answer, say so explicitly instead of guessing. "
-    "This is a voice assistant: respond in plain, natural spoken-style "
-    "prose -- no markdown, no headings, no bullet or numbered lists, no "
-    "asterisks for emphasis."
+    f"information to answer, reply with exactly {INSUFFICIENT_CONTEXT} and "
+    "nothing else -- no explanation, and do not quote the passages. "
+    "Otherwise this is a voice assistant: respond in plain, natural "
+    "spoken-style prose -- no markdown, no headings, no bullet or numbered "
+    "lists, no asterisks for emphasis."
 )
 
 
@@ -60,9 +74,25 @@ def _call_model(prompt: str) -> str:
     return first_block.text
 
 
+def _is_decline(answer: str) -> bool:
+    """Whether the model returned the decline sentinel rather than an answer.
+
+    Matches only at the start of the reply, after stripping whitespace and
+    trailing punctuation. Substring matching anywhere would let a real answer
+    that merely mentions the sentinel refuse a question -- a false positive
+    here refuses a real question, the failure mode the off-topic threshold
+    already shipped once.
+    """
+    return answer.strip().rstrip(".!").upper().startswith(INSUFFICIENT_CONTEXT)
+
+
 def generate_answer(query: str, retrieval: RetrievalOutput) -> StageResult:
     prompt = _build_prompt(query, retrieval)
     result = run_stage(lambda: _call_model(prompt))
     if not result.ok:
         return result
-    return StageResult(ok=True, value=GenerationOutput(answer=result.value))
+    answer = result.value
+    return StageResult(
+        ok=True,
+        value=GenerationOutput(answer=answer, insufficient_context=_is_decline(answer)),
+    )

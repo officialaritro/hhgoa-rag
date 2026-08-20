@@ -143,6 +143,22 @@ async def _run_strategy_pipeline(transcript: str, strategy: str) -> dict[str, An
         }
 
     answer = generation_result.value.answer
+
+    # A decline is a refusal, not an answer. It cannot be left for the
+    # groundedness guard below: the model quotes the passages when explaining
+    # why it cannot answer, so a decline scores as well against the context as
+    # a real answer (measured 0.533 fixed_size / 0.795 semantic vs a 0.40
+    # threshold) and would be rendered to the user as an answer with no
+    # refusal reason at all.
+    if generation_result.value.insufficient_context:
+        return {
+            "answer": None,
+            "refusal_reason": "not in the retrieved passages",
+            "stages_ms": stages,
+            "top_score": top_score,
+            "passages": passages,
+        }
+
     mark = time.perf_counter()
     grounded = await run_in_threadpool(
         check_groundedness, answer=answer, retrieval=retrieval

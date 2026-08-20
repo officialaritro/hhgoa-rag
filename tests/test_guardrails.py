@@ -110,3 +110,26 @@ def test_check_off_topic_rejects_a_strategy_with_no_measured_threshold():
     exists to prevent, so an unmeasured strategy must fail loudly."""
     with pytest.raises(ValueError, match="no measured off-topic threshold"):
         check_off_topic(top_similarity_score=0.8, strategy="hnsw_experimental")
+
+
+def test_check_unsafe_input_flags_a_credential_request():
+    """The one off-topic query no similarity threshold can reject: it scores
+    0.612/0.743 and clears the off-topic gate, because a web-search corpus
+    genuinely contains bank-and-password passages. It is caught here instead,
+    pre-retrieval."""
+    result = check_unsafe_input("what is my bank account password")
+
+    assert result.passed is False
+    assert result.reason == "unsafe input"
+
+
+def test_check_unsafe_input_still_answers_legitimate_password_questions():
+    """The corpus is web-search queries, so password how-tos are real questions
+    the pipeline must answer. The pattern is anchored on "what is my <secret>"
+    precisely so this keeps working."""
+    for transcript in (
+        "how do I change my bank password",
+        "what is a strong password",
+        "how to reset my pin at an atm",
+    ):
+        assert check_unsafe_input(transcript).passed is True, transcript
