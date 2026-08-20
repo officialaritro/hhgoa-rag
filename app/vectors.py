@@ -26,8 +26,7 @@ from pathlib import Path
 import numpy as np
 
 from app.embeddings import active_model_name, embed_batch
-from app.passages import PICKLE_PROTOCOL, Passage, resolve_text
-from app.strategies import Chunk
+from app.passages import PICKLE_PROTOCOL, Chunk, Passage, resolve_embed_text
 
 
 def sidecar_path(vectors_path: str) -> str:
@@ -62,7 +61,10 @@ def embed_chunks_to_disk(
 
     def flush(batch: list[Chunk], handle) -> None:
         nonlocal dimension
-        texts = [resolve_text(row, passages) for row in batch]
+        # resolve_embed_text, not resolve_text: the return text is what
+        # generation sees, and for parent_child / sentence_window / query_aware
+        # it is deliberately not what belongs in the vector.
+        texts = [resolve_embed_text(row, passages) for row in batch]
         vectors = np.asarray(embed_batch(texts), dtype="float32")
         if dimension and vectors.shape[1] != dimension:
             raise ValueError(

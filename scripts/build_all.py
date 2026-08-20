@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import Any
 
 from app.passages import build_passage_store, load_passage_store
-from app.strategies import chunk_paths, get, names
+from app.strategies import chunk_paths, dense_names, get
 from app.vectors import sidecar_path
 
 CORPUS_PATH = "data/corpus.jsonl"
@@ -174,6 +174,20 @@ def run_with_retries(
             if attempt < attempts:
                 time.sleep(backoff * attempt)
     raise PhaseFailed(f"failed after {attempts} attempts: {last}") from last
+
+
+def count_chunks(strategy_name: str, passages: list[Any]) -> int | None:
+    """Exact chunk count, or None when counting would cost as much as building.
+
+    Only `semantic` embeds while chunking, so only `semantic` cannot be counted
+    up front. For the other seven this is a pure string pass over the store --
+    cheap enough to buy a real percentage and ETA, which an unattended overnight
+    run needs far more than it needs to save two seconds.
+    """
+    strategy = get(strategy_name)
+    if strategy.chunking_embeds or strategy.chunker is None:
+        return None
+    return sum(1 for _ in strategy.chunker(passages))
 
 
 # ---------------------------------------------------------------- child phases
@@ -380,7 +394,7 @@ def main(argv: list[str] | None = None) -> int:
     selected = (
         tuple(s.strip() for s in args.strategies.split(","))
         if args.strategies
-        else names()
+        else dense_names()
     )
     log(f"strategies: {', '.join(selected)}\n")
 
@@ -396,17 +410,23 @@ def main(argv: list[str] | None = None) -> int:
             continue
 
         log(f"{strategy_name}: {strategy.description}")
+        counted: int | None = None
+        if "embed" in phases:
+            counted = count_chunks(
+                strategy_name, load_passage_store(PASSAGE_STORE_PATH)
+            )
+            log(
+                f"  chunks: {counted:,}"
+                if counted is not None
+                else "  chunks: unknown up front (chunking embeds), no ETA for this one"
+            )
         entry: dict[str, Any] = {"strategy": strategy_name, "status": "built"}
         phase_started = time.monotonic()
         try:
             for phase in phases:
                 # Only the embedding phase has a knowable total up front, and
                 # only because whole_passage is one chunk per passage.
-                total = (
-                    total_passages
-                    if phase == "embed" and strategy_name == "whole_passage"
-                    else None
-                )
+                total = counted if phase == "embed" else None
                 run_with_retries(
                     # Every loop variable is bound as a default: a bare closure
                     # over strategy_name is a late-binding bug waiting for the

@@ -472,7 +472,9 @@ def test_ask_refuses_when_the_model_declines_to_answer(
     mock_offtopic.return_value.passed = True
     mock_generate.return_value = StageResult(
         ok=True,
-        value=GenerationOutput(answer="INSUFFICIENT_CONTEXT", insufficient_context=True),
+        value=GenerationOutput(
+            answer="INSUFFICIENT_CONTEXT", insufficient_context=True
+        ),
     )
 
     body = client.post("/api/ask", content=b"audio").json()

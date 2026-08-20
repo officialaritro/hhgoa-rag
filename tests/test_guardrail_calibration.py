@@ -196,3 +196,81 @@ def test_the_accepted_leak_is_caught_by_the_unsafe_guard_instead(strategy):
         f"gate at {CLEARLY_UNRELATED_SCORES[strategy][KNOWN_UNCATCHABLE_BY_SIMILARITY]} "
         f"and must therefore be refused by the unsafe-input guard instead"
     )
+
+
+# The chunker configuration each table above was measured against. A calibration
+# number only describes the index it was measured on, and changing a chunker
+# changes the index -- so these are a tripwire, not documentation.
+CALIBRATED_AGAINST = {
+    "fixed_size": {"chars": 700, "overlap": 0.2},
+    "semantic": {"threshold": 0.8},
+}
+
+# Calibrations known to no longer describe the chunker that would be built now.
+# Entries here are still valid for the *deployed* index, which is why the live
+# service is unaffected, but they must be re-measured before the rebuilt index
+# is served. app/chunkers.py SEMANTIC_THRESHOLD moved 0.8 -> 0.40 after the
+# adjacent-sentence distribution was measured (median 0.407); at 0.8 the chunker
+# merged 4.6% of pairs, at 0.40 it merges 51.1%, so chunk count drops from
+# 338,544 to roughly 172,000 and every semantic score above shifts with it.
+STALE_CALIBRATION = {
+    "semantic": (
+        "SEMANTIC_THRESHOLD moved 0.8 -> 0.40 (measured median 0.407). "
+        "Re-measure the semantic tables against the rebuilt index before "
+        "serving it. Tracked as the build-time calibration work in "
+        "docs/prd/2026-08-20-chunking-strategy-expansion.md section E."
+    ),
+}
+
+
+def test_a_changed_chunker_marks_its_calibration_stale():
+    """Guards the failure mode the calibration tables are most exposed to: a
+    chunker is retuned, the index changes underneath the recorded numbers, and
+    every assertion above keeps passing while describing an index that no
+    longer exists.
+
+    This does not demand the numbers be current -- it demands that a mismatch
+    be *declared*. Silence is the bug.
+    """
+    from app.chunkers import (
+        FIXED_SIZE_CHARS,
+        FIXED_SIZE_OVERLAP,
+        SEMANTIC_THRESHOLD,
+    )
+
+    live = {
+        "fixed_size": {"chars": FIXED_SIZE_CHARS, "overlap": FIXED_SIZE_OVERLAP},
+        "semantic": {"threshold": SEMANTIC_THRESHOLD},
+    }
+    for strategy, measured_config in CALIBRATED_AGAINST.items():
+        if live[strategy] != measured_config:
+            assert strategy in STALE_CALIBRATION, (
+                f"{strategy}'s chunker changed from {measured_config} to "
+                f"{live[strategy]}, so its calibration tables no longer describe "
+                f"the index that would be built. Either re-measure them or record "
+                f"the mismatch in STALE_CALIBRATION."
+            )
+        else:
+            assert strategy not in STALE_CALIBRATION, (
+                f"{strategy} is marked stale but its chunker config matches what "
+                f"was measured; remove the stale marker."
+            )
+
+
+def test_no_strategy_is_served_on_a_stale_calibration_after_migration():
+    """The actual danger is serving a rebuilt index against numbers measured on
+    the old one. Rebuilding is harmless; serving is not.
+
+    `semantic` is deliberately exempt while the deployed index still predates
+    the retune -- the live service is calibrated correctly for what it holds.
+    This test starts biting the moment retrieval migrates to the new span
+    format, which is when the rebuilt index becomes the served one.
+    """
+    from app.retrieval import INDEX_PATHS
+
+    migrated = set(INDEX_PATHS) - {"fixed_size", "semantic"}
+    for strategy in migrated:
+        assert strategy not in STALE_CALIBRATION, (
+            f"{strategy} is served but its calibration is stale: "
+            f"{STALE_CALIBRATION.get(strategy)}"
+        )
