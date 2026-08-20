@@ -12,6 +12,7 @@ import pytest
 
 from scripts.build_all import (
     PhaseFailed,
+    RateWindow,
     format_duration,
     render_progress,
     run_with_retries,
@@ -121,9 +122,7 @@ def test_render_progress_reports_percent_rate_and_eta():
 def test_render_progress_omits_percent_when_the_total_is_unknown():
     """Semantic chunking cannot report a total without doing the work twice, so
     the bar has to degrade to a count rather than print a fake percentage."""
-    line = render_progress(
-        label="semantic/embed", done=1234, total=None, elapsed=10.0
-    )
+    line = render_progress(label="semantic/embed", done=1234, total=None, elapsed=10.0)
 
     assert "%" not in line
     assert "1,234" in line
@@ -135,3 +134,35 @@ def test_render_progress_survives_a_zero_elapsed_time():
     line = render_progress(label="x/embed", done=10, total=100, elapsed=0.0)
 
     assert "10%" in line
+
+
+def test_rate_window_measures_recent_throughput_not_the_whole_run():
+    """The first progress line of the whole_passage build reported ETA 50m51s
+    for a phase that finished in 5m, because a cumulative average charges the
+    one-off model load against every sample. Overnight that reads as a stalled
+    job. The window only looks at recent samples."""
+    window = RateWindow(seconds=10.0)
+    window.add(done=0, now=0.0)  # process start, model loading
+    window.add(done=0, now=9.0)  # still loading, no progress
+    window.add(done=1_000, now=10.0)
+    window.add(done=4_000, now=12.0)
+
+    # cumulative would be 4000/12 = 333/s; the last 10s did 4000 in 3s
+    assert 1_000 < window.rate() < 1_600
+
+
+def test_rate_window_is_zero_before_two_samples():
+    window = RateWindow(seconds=10.0)
+    window.add(done=5, now=1.0)
+
+    assert window.rate() == 0.0
+
+
+def test_render_progress_prefers_an_explicit_rate_over_the_elapsed_average():
+    line = render_progress(
+        label="x/embed", done=1_000, total=10_000, elapsed=100.0, rate=500.0
+    )
+
+    assert "500/s" in line
+    # ETA from the real rate: 9,000 remaining at 500/s = 18s
+    assert "ETA 18s" in line

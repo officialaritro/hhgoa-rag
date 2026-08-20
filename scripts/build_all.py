@@ -66,13 +66,52 @@ def format_duration(seconds: float) -> str:
     return f"{total // 3600}h{(total % 3600) // 60:02d}m"
 
 
+class RateWindow:
+    """Throughput over the recent past, not the whole phase.
+
+    A cumulative average charges the one-off model load (~9s on MPS, ~34s on
+    CPU) against every later sample, so early ETAs are wildly pessimistic: the
+    first line of the whole_passage build announced ETA 50m51s for a phase that
+    finished in 4m59s. At 3am that reads as a hung job worth killing.
+    """
+
+    def __init__(self, seconds: float = 60.0) -> None:
+        self._seconds = seconds
+        self._samples: list[tuple[float, int]] = []
+
+    def add(self, done: int, now: float | None = None) -> None:
+        moment = time.monotonic() if now is None else now
+        self._samples.append((moment, done))
+        cutoff = moment - self._seconds
+        keep = [s for s in self._samples if s[0] >= cutoff]
+        # Always retain one sample older than the window so a slow phase still
+        # has two points to measure between.
+        self._samples = keep if len(keep) >= 2 else self._samples[-2:]
+
+    def rate(self) -> float:
+        if len(self._samples) < 2:
+            return 0.0
+        (first_time, first_done), (last_time, last_done) = (
+            self._samples[0],
+            self._samples[-1],
+        )
+        span = last_time - first_time
+        return (last_done - first_done) / span if span > 0 else 0.0
+
+
 def render_progress(
-    label: str, done: int, total: int | None, elapsed: float
+    label: str,
+    done: int,
+    total: int | None,
+    elapsed: float,
+    rate: float | None = None,
 ) -> str:
     """One status line. `total` is None for strategies that cannot know their
     chunk count without doing the chunking twice -- those degrade to a count
-    rather than inventing a percentage."""
-    rate = done / elapsed if elapsed > 0 else 0.0
+    rather than inventing a percentage. `rate` overrides the elapsed-average
+    when the caller has a windowed measurement, which it should."""
+    if rate is None:
+        rate = done / elapsed if elapsed > 0 else 0.0
     parts = [f"{label:<28}"]
     if total:
         fraction = min(1.0, done / total)
@@ -127,7 +166,7 @@ def run_with_retries(
     for attempt in range(1, attempts + 1):
         try:
             return fn()
-        except BaseException as exc:  # noqa: BLE001 -- retry ANY failure, then re-raise wrapped
+        except BaseException as exc:
             if isinstance(exc, KeyboardInterrupt):
                 raise
             last = exc
@@ -216,13 +255,17 @@ def _spawn_phase(
     )
     interactive = sys.stdout.isatty()
     last_logged = 0.0
+    window = RateWindow(seconds=60.0)
     tail: list[str] = []
     assert process.stdout is not None
     for line in process.stdout:
         line = line.rstrip("\n")
         if line.startswith(PROGRESS_PREFIX):
             done = int(line[len(PROGRESS_PREFIX) :])
-            rendered = render_progress(label, done, total, time.monotonic() - started)
+            window.add(done)
+            rendered = render_progress(
+                label, done, total, time.monotonic() - started, rate=window.rate()
+            )
             if interactive:
                 print(f"\r  {rendered}", end="", flush=True)
             elif time.monotonic() - last_logged >= 30:
@@ -300,9 +343,16 @@ def main(argv: list[str] | None = None) -> int:
         and shutil.which("caffeinate")
     ):
         os.environ["_BUILD_ALL_CAFFEINATED"] = "1"
-        os.execvp(  # noqa: S606 -- fixed argv, no shell
+        os.execvp(
             "caffeinate",
-            ["caffeinate", "-ims", sys.executable, "-m", "scripts.build_all", *sys.argv[1:]],
+            [
+                "caffeinate",
+                "-ims",
+                sys.executable,
+                "-m",
+                "scripts.build_all",
+                *sys.argv[1:],
+            ],
         )
 
     Path("logs").mkdir(exist_ok=True)
@@ -328,7 +378,9 @@ def main(argv: list[str] | None = None) -> int:
     log(f"  passages: {total_passages:,}")
 
     selected = (
-        tuple(s.strip() for s in args.strategies.split(",")) if args.strategies else names()
+        tuple(s.strip() for s in args.strategies.split(","))
+        if args.strategies
+        else names()
     )
     log(f"strategies: {', '.join(selected)}\n")
 
@@ -356,8 +408,11 @@ def main(argv: list[str] | None = None) -> int:
                     else None
                 )
                 run_with_retries(
-                    lambda p=phase, t=total: _spawn_phase(
-                        p, strategy_name, t, args.batch_size, log
+                    # Every loop variable is bound as a default: a bare closure
+                    # over strategy_name is a late-binding bug waiting for the
+                    # first time this call is deferred instead of run inline.
+                    lambda p=phase, t=total, s=strategy_name: _spawn_phase(
+                        p, s, t, args.batch_size, log
                     ),
                     attempts=args.attempts,
                     log=log,
@@ -389,11 +444,15 @@ def main(argv: list[str] | None = None) -> int:
         chunks = f"{entry['chunks']:,}" if entry.get("chunks") else "-"
         mb = f"{entry['index_mb']:.1f}" if entry.get("index_mb") else "-"
         seconds = format_duration(entry["seconds"]) if entry.get("seconds") else "-"
-        log(f"{entry['strategy']:<20} {entry['status']:<9} {chunks:>10} {mb:>9} {seconds:>8}")
+        log(
+            f"{entry['strategy']:<20} {entry['status']:<9} {chunks:>10} {mb:>9} {seconds:>8}"
+        )
 
     failed = [entry for entry in results if entry["status"] == "failed"]
     if failed:
-        log(f"\n{len(failed)} strategy/strategies FAILED -- see above. Re-run to resume.")
+        log(
+            f"\n{len(failed)} strategy/strategies FAILED -- see above. Re-run to resume."
+        )
     else:
         log("\nall strategies built.")
     log_file.close()
