@@ -28,3 +28,7 @@ data/
 
 # Build logs
 logs/
+
+# HuggingFace model cache (deploy/setup.sh places it inside the app dir so
+# systemd ProtectHome cannot hide it from the service)
+.cache/

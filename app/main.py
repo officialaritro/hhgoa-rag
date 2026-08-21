@@ -1,8 +1,11 @@
 """FastAPI app entry point -- wires speech-to-text, guardrails, retrieval,
-and generation into one endpoint (plan Task 8).
+reranking and generation into one endpoint.
 
-Run: uvicorn app.main:app --host 0.0.0.0 --port 8000
-(see docs/plans/2026-08-18-voice-enabled-rag-pipeline.md -> Runtime Environment)
+Run: uvicorn app.main:app --host 127.0.0.1 --port 8000
+
+Binds loopback in production: Caddy terminates TLS on 443 and proxies here.
+Binding 0.0.0.0 would expose the app unencrypted and break the microphone,
+since getUserMedia is a secure-context-only API.
 """
 
 import asyncio

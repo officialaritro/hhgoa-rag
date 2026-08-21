@@ -2,9 +2,8 @@
 critical path (plan Global Constraints). Used by retrieval (Task 4) and the
 groundedness guardrail (Task 7).
 
-Pulled forward from Task 3: this module has no dependency on the ingested
-dataset, unlike chunk_semantic.py/indexing.py/build_index.py which are still
-blocked pending disk space for the corpus download.
+This module has no dependency on the ingested dataset, unlike app/chunkers.py
+and app/indexing.py.
 """
 
 import os
@@ -50,10 +49,10 @@ def embed(text: str) -> NDArray[np.float32]:
 
 
 def embed_batch(texts: list[str], batch_size: int = 64) -> NDArray[np.float32]:
-    """Batched embedding for bulk indexing (Task 3's build_index).
+    """Batched embedding for bulk indexing (app/vectors.py).
     Per-call model overhead makes embedding texts one at a time far slower
     than batching -- measured ~354 texts/sec batched vs. a small fraction of
-    that one at a time on this hardware, discovered when build_index took
+    that one at a time on this hardware, discovered when the index build took
     far longer than the batched-throughput estimate projected."""
     model = _get_model()
     return model.encode(texts, normalize_embeddings=True, batch_size=batch_size)

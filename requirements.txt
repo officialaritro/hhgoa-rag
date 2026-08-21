@@ -1,9 +1,0 @@
-fastapi
-uvicorn[standard]
-pydantic
-python-dotenv
-pytest
-httpx
-datasets
-sentence-transformers
-faiss-cpu

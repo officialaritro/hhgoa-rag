@@ -168,4 +168,8 @@ MEASURED_THRESHOLD = 0.40
 # where the distributions previously overlapped, 100% of ungrounded answers
 # caught at zero false refusals, and fabricated figures detected at all -- but
 # the latency budget has to absorb it rather than being helped by it.
-GUARD_LATENCY_IS_A_COST_NOT_A_SAVING = True
+#
+# Later measurement on the live service settled it properly: reusing the vectors
+# retrieval already computed (see app/retrieval.py) took this guard to 11.8ms
+# P50 on the deployed instance, against 110.7ms for the version it replaced. The
+# saving came from not re-embedding, not from the restructuring.

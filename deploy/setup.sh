@@ -55,12 +55,20 @@ if [ ! -f "$APP_DIR/.env" ]; then
   exit 1
 fi
 
-if [ ! -f "$APP_DIR/data/index_fixed_size.faiss" ] || [ ! -f "$APP_DIR/data/index_semantic.faiss" ]; then
+if [ ! -f "$APP_DIR/data/index_whole_passage.faiss" ] || [ ! -f "$APP_DIR/data/passages.pkl" ]; then
   echo "==> Building corpus and indices (first deploy only; skip if data/ already populated)"
   uv run python -m scripts.ingest_dataset
-  uv run python -m scripts.chunk_fixed_size
-  uv run python -m scripts.chunk_semantic
-  uv run python -m scripts.build_index
+  # One command builds every registered strategy: it derives the slate from the
+  # registry, so a strategy added later needs no change here. Chunking is no
+  # longer a separate step -- chunkers stream straight into the embedder rather
+  # than materialising intermediate files.
+  uv run python -m scripts.build_all
+  # BM25 for the hybrid strategy, and the per-index off-topic thresholds. The
+  # thresholds are not optional: app/guardrails.py raises MissingCalibration
+  # rather than borrow another index's number, so an uncalibrated index cannot
+  # be served at all.
+  uv run python -m scripts.build_lexical
+  uv run python -m scripts.calibrate_thresholds
 fi
 
 echo "==> Writing systemd unit"

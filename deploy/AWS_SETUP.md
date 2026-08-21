@@ -14,7 +14,7 @@ This is a handover for whoever provisions AWS, so that person can work in parall
 
 Per the plan's hosting decision, this must be a single long-running instance, not Lambda/Fargate — a warm, in-memory FAISS index and embedding model are load-bearing for the latency target, and cold starts work directly against it.
 
-- **Instance type:** `m7i-flex.large` (2 vCPU / 8 GB RAM, Sapphire Rapids). Chosen because it is free-tier-eligible on this account *and* beats the originally-planned `t3.medium` on both memory and clock — see the Free Plan constraint in the change log before changing it.
+- **Instance type:** `c7i.2xlarge` (8 vCPU / 16 GB RAM, Xeon Platinum 8488C, Sapphire Rapids). Resized up from `m7i-flex.large` once cross-encoder reranking was added: `m7i-flex` is a **burstable** family, and a cross-encoder on every request is sustained CPU, which those instances throttle. On 2 vCPU the reranker cost 124-227 ms live and pushed boundary A past its 200 ms target; on 8 vCPU the whole owned pipeline is 84.7 ms P50. Set `RERANK_ENABLED=0` if you resize back down.
 - **AMI:** the latest Ubuntu LTS AMI (22.04 or 24.04) for your chosen region — pick it from the EC2 console or `aws ec2 describe-images` at launch time rather than hardcoding an AMI ID here, since AMI IDs are region-specific and change over time.
 - **Region:** pick the region closest to where judges/users will actually connect from, since network latency to the instance is part of the pipeline's measured latency (PRD Open Decision 4).
 - **Storage:** the 8 GiB default is **not** sufficient. Grow the root volume to 20 GiB. Note this is one-way — EBS volumes can be grown online but never shrunk.
@@ -61,7 +61,7 @@ Let's Encrypt refuses to issue certificates for `*.compute.amazonaws.com`, so th
 
 ## Cost
 
-The instance type in use (`m7i-flex.large`) and the 20 GiB gp3 volume are both within free-tier-eligible bounds on this account's plan. Check the [EC2 pricing page](https://aws.amazon.com/ec2/pricing/on-demand/) for current `ap-south-1` rates if anything is added beyond this. For a ~4-day build-and-demo window, cost is not the binding constraint.
+`c7i.2xlarge` is **not** free-tier-eligible: it runs about $0.357/hr in `ap-south-1`, so roughly $12 for a two-day demo window and about $60 a week if left running. Resize back to `m7i-flex.large` (~$0.101/hr) once judging is done, and set `RERANK_ENABLED=0` at the same time. Note that resizing to a non-free type requires a paid account plan — a free-plan account refuses it with `FreeTierRestrictionError` regardless of available credits, which are two different things.
 
 ## Handback
 
@@ -75,7 +75,7 @@ Applied 2026-08-19. Steps 1–5 are **done and verified**; steps 6–7 remain an
 
 | # | Change | Status |
 |---|---|---|
-| 1 | Instance type → `m7i-flex.large` (7.6 GB RAM) | **Done** |
+| 1 | Instance type → `m7i-flex.large` (7.6 GB RAM), later resized to `c7i.2xlarge` | **Done** |
 | 2 | Root volume 8 → 20 GiB gp3 | **Done** |
 | 3 | 2 GB swapfile, `vm.swappiness=10` | **Done** |
 | 4 | DuckDNS `ragingoa.duckdns.org` → `13.234.228.244` | **Done** |
@@ -83,7 +83,7 @@ Applied 2026-08-19. Steps 1–5 are **done and verified**; steps 6–7 remain an
 | 6 | Install Caddy, issue Let's Encrypt certificate | **Done** — valid to 16 Nov 2026 |
 | 7 | Revoke public port 8000 | **Done** — verified unreachable; only 22/80/443 remain |
 
-Verified final state: `i-09e157bfae9bb82a6`, `ap-south-1b`, `m7i-flex.large`, Xeon Platinum 8488C (Sapphire Rapids), 2 vCPU, 7778 MiB RAM, 19 G filesystem with 15 G free, 2 G swap active and persisted in `/etc/fstab`, Elastic IP `13.234.228.244` still associated.
+Verified final state: `i-09e157bfae9bb82a6`, `ap-south-1b`, `c7i.2xlarge`, Xeon Platinum 8488C (Sapphire Rapids), 8 vCPU, 15,700 MiB RAM, 19 G filesystem, Elastic IP `13.234.228.244` still associated. The Elastic IP is what makes a resize safe: the address, the DuckDNS record and the TLS certificate all survive a stop/start.
 
 ### The Free Plan constraint (read this before changing instance type again)
 

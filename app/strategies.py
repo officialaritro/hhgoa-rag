@@ -1,8 +1,8 @@
 """The one place a chunking strategy is defined.
 
-Strategy identity used to be duplicated across four modules -- `_CHUNKS_PATHS`
-in scripts/build_index.py, `INDEX_PATHS` in app/retrieval.py, `_STRATEGIES` in
-app/main.py, and `_DEFAULT_OFFTOPIC_THRESHOLDS` in app/guardrails.py. At two
+Strategy identity used to be duplicated across four modules -- a chunk-path map
+in the build script, `INDEX_PATHS` in app/retrieval.py, `_STRATEGIES` in
+app/main.py, and a threshold dict in app/guardrails.py. At two
 strategies that is eight entries to keep in sync; at ten it is forty, and a
 missed entry is exactly the defect class that put a threshold calibrated
 against one index into production as another index's default.

@@ -7,9 +7,8 @@ eight chances to forget one. After this runs, an uncalibrated index cannot be
 served -- `app.guardrails.offtopic_threshold` raises instead of borrowing
 another strategy's number.
 
-The statistic is the one scripts/tune_thresholds.py already established: the
-in-corpus p05 (which decides false refusals) against the off-topic p95 (which
-decides leaks). The threshold is placed at the in-corpus p05, tuned for low
+The statistic is the in-corpus p05, which decides false refusals, read against
+the off-topic p95, which decides leaks. The threshold is placed at the in-corpus p05, tuned for low
 false refusal because a refused real question is the damaging, user-visible
 failure, and off-topic input that slips through still faces the generation
 prompt's decline sentinel and the groundedness guard.

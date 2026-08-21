@@ -91,13 +91,20 @@ def test_a_composed_strategy_inherits_its_primary_member_threshold(monkeypatch):
     from RRF, the score does not -- so the member's calibrated threshold is the
     right gate. Without this the guard raises MissingCalibration on every
     composed request.
+
+    The member's threshold is supplied through its environment override rather
+    than read from a built manifest: `data/` is not in version control, so a test
+    that needs a real index passes here and fails in CI. That is exactly what
+    happened to an earlier version of this test.
     """
     from app.strategies import get
 
+    primary = get("hybrid").members[0]
     monkeypatch.delenv("OFFTOPIC_SIMILARITY_THRESHOLD_HYBRID", raising=False)
+    monkeypatch.setenv(f"OFFTOPIC_SIMILARITY_THRESHOLD_{primary.upper()}", "0.5432")
     offtopic_threshold.cache_clear()
     try:
-        primary = get("hybrid").members[0]
+        assert offtopic_threshold("hybrid") == 0.5432
         assert offtopic_threshold("hybrid") == offtopic_threshold(primary)
     finally:
         offtopic_threshold.cache_clear()

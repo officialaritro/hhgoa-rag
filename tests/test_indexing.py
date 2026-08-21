@@ -1,212 +1,98 @@
+"""Tests for loading an index back, and refusing to load a mismatched one.
+
+Building is covered by tests/test_index_from_vectors.py. What is left here is
+`load_index`, and specifically the guard that made it necessary: two different
+embedding models both emit 384-dim vectors, so an index built with one and
+searched with the other does not crash. FAISS searches happily and returns
+neighbours from an unrelated vector space, and the answers look plausible and
+mean nothing. That happened in practice -- `.env` pointed at bge-small while the
+indices had been built with all-MiniLM -- so the manifest check exists to make
+it loud.
+"""
+
 import json
-from unittest.mock import patch
+import pickle
+from pathlib import Path
 
 import numpy as np
+import pytest
 
-from app.indexing import build_index, load_index
+from app.indexing import IndexModelMismatch, index_from_vectors, load_index
+from app.passages import PICKLE_PROTOCOL
+from app.vectors import sidecar_path
+
+DIM = 8
 
 
-def _write_chunks(path, chunks):
-    with open(path, "w") as f:
-        f.writelines(json.dumps(chunk) + "\n" for chunk in chunks)
+def _build(tmp_path, count=40, model="sentence-transformers/all-MiniLM-L6-v2"):
+    """Writes a vector file and metadata the way the embedding phase would, then
+    builds a real index from them."""
+    rng = np.random.default_rng(0)
+    vectors = rng.standard_normal((count, DIM)).astype("float32")
+    vectors /= np.linalg.norm(vectors, axis=1, keepdims=True)
 
-
-@patch("app.indexing.embed_batch")
-def test_build_index_returns_chunk_count_and_persists_files(mock_embed, tmp_path):
-    mock_embed.side_effect = lambda texts, **kwargs: np.array(
-        [[float(len(text)), 0.0, 0.0] for text in texts], dtype="float32"
+    vectors_path = tmp_path / "v.f32"
+    vectors_path.write_bytes(np.ascontiguousarray(vectors).tobytes())
+    Path(sidecar_path(str(vectors_path))).write_text(
+        json.dumps({"count": count, "dimension": DIM, "embedding_model": model})
     )
-    chunks_path = tmp_path / "chunks.jsonl"
-    _write_chunks(
-        chunks_path,
-        [
-            {
-                "text": "short",
-                "source_passage": "short",
-                "is_selected": True,
-                "query_id": 1,
-                "strategy": "fixed_size",
-            },
-            {
-                "text": "a bit longer text",
-                "source_passage": "a bit longer text",
-                "is_selected": False,
-                "query_id": 2,
-                "strategy": "fixed_size",
-            },
-        ],
-    )
+    metadata_path = tmp_path / "chunks.pkl"
+    rows = [{"parent_id": i, "start": 0, "end": 10} for i in range(count)]
+    with open(metadata_path, "wb") as f:
+        pickle.dump(rows, f, protocol=PICKLE_PROTOCOL)
+
     index_path = tmp_path / "index.faiss"
-    metadata_path = tmp_path / "metadata.pkl"
-
-    written = build_index(str(chunks_path), str(index_path), str(metadata_path))
-
-    assert written == 2
-    assert index_path.exists()
-    assert metadata_path.exists()
+    index_from_vectors(str(vectors_path), str(index_path), str(metadata_path))
+    return vectors, str(index_path), str(metadata_path)
 
 
-@patch("app.indexing.embed_batch")
-def test_load_index_returns_index_and_metadata_matching_input(mock_embed, tmp_path):
-    mock_embed.side_effect = lambda texts, **kwargs: np.array(
-        [[float(len(text)), 0.0, 0.0] for text in texts], dtype="float32"
-    )
-    chunks_path = tmp_path / "chunks.jsonl"
-    _write_chunks(
-        chunks_path,
-        [
-            {
-                "text": "hello",
-                "source_passage": "hello",
-                "is_selected": True,
-                "query_id": 7,
-                "strategy": "fixed_size",
-            }
-        ],
-    )
-    index_path = tmp_path / "index.faiss"
-    metadata_path = tmp_path / "metadata.pkl"
-    build_index(str(chunks_path), str(index_path), str(metadata_path))
+def test_load_index_returns_the_index_and_its_metadata(tmp_path, monkeypatch):
+    monkeypatch.setenv("EMBEDDING_MODEL_NAME", "sentence-transformers/all-MiniLM-L6-v2")
+    _, index_path, metadata_path = _build(tmp_path)
 
-    index, metadata = load_index(str(index_path), str(metadata_path))
+    index, rows = load_index(index_path, metadata_path)
 
-    assert index.ntotal == 1
-    assert metadata[0]["query_id"] == 7
-    assert metadata[0]["text"] == "hello"
+    assert index.ntotal == 40
+    assert len(rows) == 40
+    assert rows[0] == {"parent_id": 0, "start": 0, "end": 10}
 
 
-@patch("app.indexing.embed_batch")
-def test_built_index_returns_nearest_neighbor_for_query_vector(mock_embed, tmp_path):
-    mock_embed.side_effect = lambda texts, **kwargs: np.array(
-        [[float(len(text)), 0.0, 0.0] for text in texts], dtype="float32"
-    )
-    chunks_path = tmp_path / "chunks.jsonl"
-    _write_chunks(
-        chunks_path,
-        [
-            {
-                "text": "aa",
-                "source_passage": "aa",
-                "is_selected": False,
-                "query_id": 1,
-                "strategy": "fixed_size",
-            },
-            {
-                "text": "aaaaaaaaaa",
-                "source_passage": "aaaaaaaaaa",
-                "is_selected": True,
-                "query_id": 2,
-                "strategy": "fixed_size",
-            },
-        ],
-    )
-    index_path = tmp_path / "index.faiss"
-    metadata_path = tmp_path / "metadata.pkl"
-    build_index(str(chunks_path), str(index_path), str(metadata_path))
-    index, metadata = load_index(str(index_path), str(metadata_path))
+def test_a_loaded_index_still_finds_its_own_vectors(tmp_path, monkeypatch):
+    monkeypatch.setenv("EMBEDDING_MODEL_NAME", "sentence-transformers/all-MiniLM-L6-v2")
+    vectors, index_path, metadata_path = _build(tmp_path)
 
-    query_vec = np.array([[9.0, 0.0, 0.0]], dtype="float32")
-    _distances, indices = index.search(query_vec, k=1)
+    index, rows = load_index(index_path, metadata_path)
+    _, ids = index.search(vectors[17:18], 1)
 
-    assert metadata[indices[0][0]]["query_id"] == 2
+    assert rows[ids[0][0]]["parent_id"] == 17
 
 
-@patch("app.indexing.embed_batch")
-def test_build_index_quantizes_vectors_to_fit_memory_budget(mock_embed, tmp_path):
-    """Both chunking strategies' indices must be resident together on a
-    t3.small's 2GiB RAM; a raw float32 IndexFlatIP (4 bytes/dim) doesn't
-    leave headroom, so build_index must persist compressed (int8) codes."""
-    mock_embed.side_effect = lambda texts, **kwargs: np.array(
-        [[float(len(text)), 0.0, 0.0] for text in texts], dtype="float32"
-    )
-    chunks_path = tmp_path / "chunks.jsonl"
-    _write_chunks(
-        chunks_path,
-        [
-            {
-                "text": "a" * n,
-                "source_passage": "a" * n,
-                "is_selected": False,
-                "query_id": n,
-                "strategy": "fixed_size",
-            }
-            for n in range(1, 9)
-        ],
-    )
-    index_path = tmp_path / "index.faiss"
-    metadata_path = tmp_path / "metadata.pkl"
+def test_load_index_refuses_an_index_built_by_a_different_model(tmp_path, monkeypatch):
+    """The dangerous case, because nothing fails on its own: both models emit
+    384-dim vectors, so retrieval returns confident nonsense instead of an
+    error."""
+    _, index_path, metadata_path = _build(tmp_path, model="BAAI/bge-small-en-v1.5")
+    monkeypatch.setenv("EMBEDDING_MODEL_NAME", "sentence-transformers/all-MiniLM-L6-v2")
 
-    build_index(str(chunks_path), str(index_path), str(metadata_path))
-    index, _ = load_index(str(index_path), str(metadata_path))
+    with pytest.raises(IndexModelMismatch) as excinfo:
+        load_index(index_path, metadata_path)
 
-    dimension = 3
-    float32_bytes_per_vector = dimension * 4
-    assert index.sa_code_size() < float32_bytes_per_vector
+    message = str(excinfo.value)
+    assert "bge-small-en-v1.5" in message
+    assert "all-MiniLM-L6-v2" in message
+    assert "rebuild" in message.lower()
 
 
-@patch("app.indexing.embed_batch")
-def test_build_index_records_the_embedding_model_in_a_manifest(mock_embed, tmp_path):
-    mock_embed.side_effect = lambda texts, **kw: np.array(
-        [[1.0, 0.0, 0.0] for _ in texts], dtype="float32"
-    )
-    chunks_path = tmp_path / "chunks.jsonl"
-    _write_chunks(
-        chunks_path,
-        [
-            {
-                "text": "a",
-                "source_passage": "a",
-                "is_selected": True,
-                "query_id": 1,
-                "strategy": "fixed_size",
-            }
-        ],
-    )
-    index_path = tmp_path / "index.faiss"
-    build_index(str(chunks_path), str(index_path), str(tmp_path / "meta.pkl"))
+def test_an_index_predating_manifests_loads_with_a_warning_not_a_failure(
+    tmp_path, monkeypatch
+):
+    """Refusing every manifest-less index would make an old artifact unloadable
+    rather than merely unverified."""
+    monkeypatch.setenv("EMBEDDING_MODEL_NAME", "anything/at-all")
+    _, index_path, metadata_path = _build(tmp_path)
+    Path(index_path).with_suffix(".manifest.json").unlink()
 
-    manifest = json.loads((tmp_path / "index.manifest.json").read_text())
-    assert manifest["embedding_model"]
-    assert manifest["dimension"] == 3
-    assert manifest["chunks"] == 1
+    index, rows = load_index(index_path, metadata_path)
 
-
-@patch("app.indexing.embed_batch")
-def test_load_index_refuses_an_index_built_by_a_different_model(mock_embed, tmp_path):
-    """The failure this prevents is silent: both models emit 384-dim vectors,
-    so FAISS returns confident neighbours from an unrelated vector space."""
-    from app.indexing import IndexModelMismatch
-
-    mock_embed.side_effect = lambda texts, **kw: np.array(
-        [[1.0, 0.0, 0.0] for _ in texts], dtype="float32"
-    )
-    chunks_path = tmp_path / "chunks.jsonl"
-    _write_chunks(
-        chunks_path,
-        [
-            {
-                "text": "a",
-                "source_passage": "a",
-                "is_selected": True,
-                "query_id": 1,
-                "strategy": "fixed_size",
-            }
-        ],
-    )
-    index_path = tmp_path / "index.faiss"
-    metadata_path = tmp_path / "meta.pkl"
-    with patch("app.indexing.active_model_name", return_value="model-A"):
-        build_index(str(chunks_path), str(index_path), str(metadata_path))
-
-    with patch("app.indexing.active_model_name", return_value="model-B"):
-        try:
-            load_index(str(index_path), str(metadata_path))
-        except IndexModelMismatch as exc:
-            assert "model-A" in str(exc) and "model-B" in str(exc)
-        else:
-            raise AssertionError("expected IndexModelMismatch")
-
-    # Matching model still loads.
-    with patch("app.indexing.active_model_name", return_value="model-A"):
-        _, metadata = load_index(str(index_path), str(metadata_path))
-        assert len(metadata) == 1
+    assert index.ntotal == 40
+    assert len(rows) == 40

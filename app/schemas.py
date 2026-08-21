@@ -1,7 +1,7 @@
 """Pydantic input/output models for every pipeline stage boundary.
 
-Later tasks import these shared shapes rather than redefining them --
-see plan Task 1's Key Decisions in docs/plans/2026-08-18-voice-enabled-rag-pipeline.md.
+Every stage imports these shared shapes rather than redefining them, so a
+change to what retrieval returns is a change every consumer sees.
 """
 
 from pydantic import BaseModel, Field

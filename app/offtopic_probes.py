@@ -11,8 +11,8 @@ off-topic input actually leak, and the categories fail differently: a request fo
 private data is topically in-corpus (a web-search corpus really does contain
 passages about bank passwords) while gibberish is not close to anything.
 
-The original eight from scripts/tune_thresholds.py are preserved inside these
-groups so earlier measurements stay comparable.
+The original eight probes are preserved inside these groups so earlier
+measurements stay comparable.
 """
 
 PROBES: dict[str, list[str]] = {

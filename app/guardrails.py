@@ -5,7 +5,7 @@ here is a threshold on a similarity score or a pattern match.
 
 The similarity thresholds below are set from measured score distributions, not
 guessed, and each carries the measurement that justifies it. Re-measure with
-scripts/tune_thresholds.py before changing one, and check the change against
+scripts/calibrate_thresholds.py before changing one, and check the change against
 tests/test_guardrail_calibration.py, which pins the false-refusal budget.
 """
 
@@ -25,7 +25,7 @@ from app.schemas import RetrievalOutput
 def _threshold(env_var: str, default: float) -> float:
     """Read a guardrail threshold from the environment, falling back to the
     documented default. These are meant to be retuned against measured score
-    distributions (scripts/tune_thresholds.py), and retuning should not
+    distributions (scripts/calibrate_thresholds.py), and retuning should not
     require a code change -- set the value in .env and restart."""
     raw = os.environ.get(env_var, "").strip()
     if not raw:
