@@ -30,17 +30,25 @@ logger = logging.getLogger("uvicorn.error")
 # how a threshold calibrated against one index shipped as another's default.
 _STRATEGIES = served_names()
 
-# fixed_size carries the lowest measured false-refusal rate of the two
-# originally calibrated strategies (4.5% against semantic's 8.0%), so it stays
-# the default until the evaluation matrix gives a better-evidenced answer.
-_DEFAULT_STRATEGY = "fixed_size"
+# whole_passage, on the evidence now available (docs/CHUNKING_REPORT.md).
+# Nothing in the slate measurably beats it -- every paired 95% interval against
+# it contains zero or is negative -- and it is the cheapest of the strategies
+# that tie it: 38.3 MB against fixed_size's 38.8, 6.7ms search, and the fewest
+# off-topic leaks measured over 50 probes (6, tied with fixed_size, against 27
+# for semantic and 32 for query_aware).
+_DEFAULT_STRATEGY = "whole_passage"
 
 # /api/compare fans out one transcript across several strategies concurrently,
-# and every strategy in the fan-out costs its own generation call. Comparing all
-# eight would issue eight Claude calls per request, so the default is one
-# strategy per axis: the do-nothing baseline, corrected splitting, a widened
-# return unit, and query enrichment. Callers can override with ?strategies=.
-COMPARE_DEFAULT = ("fixed_size", "recursive", "sentence_window", "query_aware")
+# and every strategy in the fan-out costs its own generation call, so comparing
+# all eight would issue eight Claude calls per request.
+#
+# The default is a granularity ladder rather than one-per-axis: 1.00, 1.31, 2.20
+# and 3.51 chunks per passage. That makes the report's central finding visible in
+# the demo itself -- coarser is better on this corpus, and the finest split is
+# measurably the worst of the four. query_aware was in this list and is removed:
+# it is the weakest strategy measured (significantly worse recall, 32 of 50
+# off-topic probes leaked), so showcasing it would misrepresent the system.
+COMPARE_DEFAULT = ("whole_passage", "recursive", "semantic", "sentence_window")
 
 # Only the default is warmed at startup. The rest load on first use via the
 # cache in app/retrieval.py -- warming all eight would read 483 MB of indices
