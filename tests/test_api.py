@@ -140,7 +140,7 @@ def test_index_serves_the_frontend_page():
     response = client.get("/")
 
     assert response.status_code == 200
-    assert b"Voice-Enabled RAG Pipeline" in response.content
+    assert b"Voice RAG" in response.content
 
 
 @patch("app.main.retrieve")
