@@ -40,18 +40,67 @@ def compute_percentiles(
     }
 
 
-def run_batch(client: Any, audio_paths: list[str]) -> list[float]:
-    """Sends each audio file's bytes to the live /api/ask endpoint, timing
-    the full round trip (network + STT + retrieval + generation +
-    guardrails)."""
-    latencies_ms = []
+def boundary_latencies(
+    records: list[tuple[float, dict[str, float]]],
+) -> dict[str, list[float]]:
+    """Splits each request into the three boundaries the report is written around.
+
+    The task asks for a single figure under 200ms, but the pipeline contains two
+    third-party calls whose latency this system does not control -- speech-to-text
+    and answer generation -- so one number would hide where the time actually
+    goes and would be unactionable.
+
+      A  retrieval and every guardrail: what this system owns and can optimise
+      B  A plus answer generation
+      C  the full round trip the user waits for, including speech-to-text
+
+    Boundary A sums every stage whose name is `retrieval` or begins with
+    `guardrail`, rather than an explicit list, so a guardrail added later cannot
+    quietly fall outside the boundary the 200ms claim is made against.
+    """
+    owned: list[float] = []
+    with_generation: list[float] = []
+    end_to_end: list[float] = []
+    for total_ms, stages in records:
+        a = sum(
+            value
+            for name, value in stages.items()
+            if name == "retrieval" or name.startswith("guardrail")
+        )
+        owned.append(a)
+        with_generation.append(a + stages.get("generation", 0.0))
+        end_to_end.append(total_ms)
+    return {"A": owned, "B": with_generation, "C": end_to_end}
+
+
+def run_batch(
+    client: Any, audio_paths: list[str]
+) -> list[tuple[float, dict[str, float]]]:
+    """Sends each audio file's bytes to the live /api/ask endpoint, timing the
+    full round trip (network + STT + retrieval + generation + guardrails) and
+    keeping the per-stage breakdown the response carries.
+
+    The breakdown is not optional detail: without it the only number available
+    is end-to-end, which is dominated by two third-party calls and so cannot
+    show whether the part this system owns meets its target.
+    """
+    records: list[tuple[float, dict[str, float]]] = []
     for path in audio_paths:
         with open(path, "rb") as f:
             audio_bytes = f.read()
         start = time.perf_counter()
-        client.post("/api/ask", content=audio_bytes)
-        latencies_ms.append((time.perf_counter() - start) * 1000)
-    return latencies_ms
+        response = client.post("/api/ask", content=audio_bytes)
+        elapsed_ms = (time.perf_counter() - start) * 1000
+        try:
+            raw = response.json().get("stages_ms")
+        except Exception:  # noqa: BLE001 -- a malformed body must not lose the timing
+            raw = None
+        # Type-checked rather than trusted: a response shape change or an error
+        # body would otherwise put a non-mapping into the aggregation and fail
+        # much later, in percentile arithmetic, where the cause is invisible.
+        stages = raw if isinstance(raw, dict) else {}
+        records.append((elapsed_ms, stages))
+    return records
 
 
 def run_benchmark(
@@ -74,7 +123,7 @@ def run_benchmark(
 
         with httpx.Client(base_url=base_url, timeout=REQUEST_TIMEOUT_SECONDS) as client:
             run_batch(client, warmup_paths)
-            latencies_ms = run_batch(client, measured_paths)
+            records = run_batch(client, measured_paths)
     else:
         from fastapi.testclient import TestClient
 
@@ -82,9 +131,21 @@ def run_benchmark(
 
         with TestClient(app) as client:
             run_batch(client, warmup_paths)
-            latencies_ms = run_batch(client, measured_paths)
+            records = run_batch(client, measured_paths)
 
-    result = compute_percentiles(latencies_ms)
+    boundaries = boundary_latencies(records)
+    # The headline stays end-to-end, because that is what the user waits for and
+    # what a single-number reading of the target would mean. Per-boundary
+    # percentiles sit alongside it so the claim about the part this system owns
+    # is separable from two third-party calls.
+    result = compute_percentiles(boundaries["C"])
+    result["boundaries"] = {
+        name: compute_percentiles(values) for name, values in boundaries.items()
+    }
+    result["stage_p50_ms"] = {
+        stage: float(np.percentile([s.get(stage, 0.0) for _, s in records], 50))
+        for stage in sorted({k for _, s in records for k in s})
+    }
     result["warmup_queries_excluded"] = warmup
     result["batch_size"] = batch_size
     return result
