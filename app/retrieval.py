@@ -67,6 +67,24 @@ def _load_passages():
     return load_passage_store(PASSAGE_STORE_PATH)
 
 
+def _vector_is_reusable(row) -> bool:
+    """Whether this chunk's index vector is the vector of the text it returns.
+
+    True only when the embedded span and the returned span are the same text:
+    no widened return window (parent_child, sentence_window), no query prefix
+    baked into the embedding (query_aware), and no stored text that is not a
+    substring of any parent (query_group). For those, the index holds a vector
+    of something other than what the user is shown, and scoring the answer
+    against it would be measuring the wrong thing.
+    """
+    if row.get("text") is not None or row.get("embed_query"):
+        return False
+    return (
+        row.get("ret_start", row["start"]) == row["start"]
+        and row.get("ret_end", row["end"]) == row["end"]
+    )
+
+
 def _dense_parent_ranking(
     query_vector, strategy: str, depth: int
 ) -> tuple[list[int], dict[int, float]]:
@@ -161,12 +179,25 @@ def retrieve(query: str, strategy: str, k: int = 5) -> RetrievalOutput:
         # no single parent is its source; reporting a nominal parent would
         # understate it against the corpus relevance labels.
         source = text if row.get("text") is not None else passages[parent_id]["text"]
+
+        # Hand the groundedness guard the vector we already have, so it embeds
+        # only the answer's sentences. That guard measured 170ms on the instance
+        # and took boundary A to 210ms, past its 200ms target; re-embedding five
+        # passages that FAISS just matched is the avoidable part of it.
+        vector = None
+        if _vector_is_reusable(row):
+            try:
+                vector = [float(x) for x in index.reconstruct(int(row_id))]
+            except Exception:  # noqa: BLE001 -- not every index type reconstructs
+                vector = None
+
         found.append(
             RetrievedPassage(
                 text=text,
                 source_passage=source,
                 is_selected=bool(passages[parent_id]["is_selected"]),
                 score=float(score),
+                vector=vector,
             )
         )
         # Collect a deeper pool than the caller asked for: the reranker's gain

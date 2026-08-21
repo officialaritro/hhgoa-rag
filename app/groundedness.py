@@ -79,16 +79,47 @@ def sentence_support(answer: str, retrieval: RetrievalOutput) -> list[float]:
     sentences = split_sentences(answer)
     if not sentences:
         return []
-    passages = [p.text for p in retrieval.passages]
-    if not passages:
+    if not retrieval.passages:
         # Nothing to be grounded in. A refusal, not a crash.
         return [0.0] * len(sentences)
 
-    # One batched call for both sides. Two calls pay the model's per-call
-    # overhead twice for ~13 short texts, and the split gains nothing.
-    vectors = np.asarray(embed_batch(sentences + passages), dtype="float32")
-    sentence_vectors = vectors[: len(sentences)]
-    passage_vectors = vectors[len(sentences) :]
+    # Reuse any vector retrieval already computed. For a chunk whose embedded
+    # span is its returned span, the FAISS index holds exactly the vector of the
+    # text being returned, so re-embedding it is pure waste -- and this guard was
+    # the largest cost the pipeline owns.
+    supplied: dict[int, list[float]] = {}
+    to_embed: list[str] = []
+    for position, passage in enumerate(retrieval.passages):
+        if passage.vector:
+            supplied[position] = passage.vector
+        else:
+            to_embed.append(passage.text)
+
+    embedded = np.asarray(embed_batch(sentences + to_embed), dtype="float32")
+    sentence_vectors = embedded[: len(sentences)]
+    fresh = list(embedded[len(sentences) :])
+
+    # A vector of the wrong width means a stale artifact -- a different embedding
+    # model, most likely -- and trusting it would corrupt every decision
+    # silently. Embed that passage instead.
+    width = sentence_vectors.shape[1]
+    mismatched = [i for i, v in supplied.items() if len(v) != width]
+    if mismatched:
+        extra = np.asarray(
+            embed_batch([retrieval.passages[i].text for i in mismatched]),
+            dtype="float32",
+        )
+        for i, vector in zip(mismatched, extra):
+            supplied[i] = list(vector)
+
+    rows_out: list[np.ndarray] = []
+    fresh_iter = iter(fresh)
+    for position in range(len(retrieval.passages)):
+        if position in supplied:
+            rows_out.append(np.asarray(supplied[position], dtype="float32"))
+        else:
+            rows_out.append(next(fresh_iter))
+    passage_vectors = np.vstack(rows_out)
 
     # Both sides are L2-normalised by embed_batch, so the dot product is cosine.
     # Max over passages: a claim backed by one passage is grounded even when the

@@ -4,7 +4,7 @@ Later tasks import these shared shapes rather than redefining them --
 see plan Task 1's Key Decisions in docs/plans/2026-08-18-voice-enabled-rag-pipeline.md.
 """
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class STTInput(BaseModel):
@@ -20,6 +20,14 @@ class RetrievedPassage(BaseModel):
     source_passage: str
     is_selected: bool
     score: float
+    # The embedding of `text`, when retrieval already had it. Present only for
+    # chunks whose embedded span IS their returned span, where the vector in the
+    # FAISS index is exactly the vector of the text being returned. The
+    # groundedness guard reuses it instead of re-embedding what was just
+    # computed -- that guard measured 170ms on the instance and pushed boundary A
+    # past its 200ms target. Excluded from the API response, which has no use
+    # for 384 floats per passage.
+    vector: list[float] | None = Field(default=None, exclude=True)
 
 
 class RetrievalOutput(BaseModel):

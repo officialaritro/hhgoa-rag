@@ -437,3 +437,105 @@ def test_reranking_can_be_switched_off(
 
     mock_rerank.assert_not_called()
     assert len(result.passages) == 1
+
+
+# ------------------------------- handing the guard vectors it already computed
+
+
+@patch("app.retrieval.embed", return_value=np.zeros(3))
+@patch("app.retrieval.load_index")
+@patch("app.retrieval.load_passage_store", return_value=PASSAGES)
+def test_supplies_the_index_vector_when_return_span_equals_embed_span(
+    mock_store, mock_load, mock_embed
+):
+    """whole_passage embeds and returns the same text, so its index vector IS the
+    vector of what it returns. Handing it to the groundedness guard removes five
+    embeddings from every request -- that guard measured 170ms on the instance
+    and pushed boundary A past 200ms."""
+    rows = [{"parent_id": 0, "start": 0, "end": len(PASSAGES[0]["text"])}]
+    index = _index_returning([0])
+    index.reconstruct.return_value = np.array([0.1, 0.2, 0.3], dtype="float32")
+    mock_load.return_value = (index, rows)
+
+    result = retrieve(query="q", strategy="whole_passage", k=1)
+
+    assert result.passages[0].vector == pytest.approx([0.1, 0.2, 0.3])
+
+
+@patch("app.retrieval.embed", return_value=np.zeros(3))
+@patch("app.retrieval.load_index")
+@patch("app.retrieval.load_passage_store", return_value=PASSAGES)
+def test_supplies_no_vector_when_the_returned_text_is_wider(
+    mock_store, mock_load, mock_embed
+):
+    """sentence_window returns a window around the sentence it embedded, so the
+    index vector is the wrong text. Supplying it would score the answer against
+    something the user never saw."""
+    rows = [
+        {
+            "parent_id": 0,
+            "start": 16,
+            "end": 30,
+            "ret_start": 0,
+            "ret_end": len(PASSAGES[0]["text"]),
+        }
+    ]
+    mock_load.return_value = (_index_returning([0]), rows)
+
+    result = retrieve(query="q", strategy="sentence_window", k=1)
+
+    assert result.passages[0].vector is None
+
+
+@patch("app.retrieval.embed", return_value=np.zeros(3))
+@patch("app.retrieval.load_index")
+@patch("app.retrieval.load_passage_store", return_value=PASSAGES)
+def test_supplies_no_vector_for_a_query_enriched_chunk(
+    mock_store, mock_load, mock_embed
+):
+    """query_aware's index vector contains the gold query prepended, but it
+    returns the passage bare. Reusing it would score the answer against a
+    different string than the one shown."""
+    rows = [
+        {
+            "parent_id": 0,
+            "start": 0,
+            "end": len(PASSAGES[0]["text"]),
+            "embed_query": True,
+        }
+    ]
+    mock_load.return_value = (_index_returning([0]), rows)
+
+    result = retrieve(query="q", strategy="query_aware", k=1)
+
+    assert result.passages[0].vector is None
+
+
+@patch("app.retrieval.embed", return_value=np.zeros(3))
+@patch("app.retrieval.load_index")
+@patch("app.retrieval.load_passage_store", return_value=PASSAGES)
+def test_supplies_no_vector_for_a_stored_text_chunk(mock_store, mock_load, mock_embed):
+    """query_group concatenates across passages; nothing in the index is that."""
+    rows = [{"parent_id": 0, "start": 0, "end": 0, "text": "spans two passages"}]
+    mock_load.return_value = (_index_returning([0]), rows)
+
+    result = retrieve(query="q", strategy="query_group", k=1)
+
+    assert result.passages[0].vector is None
+
+
+@patch("app.retrieval.embed", return_value=np.zeros(3))
+@patch("app.retrieval.load_index")
+@patch("app.retrieval.load_passage_store", return_value=PASSAGES)
+def test_a_reconstruct_failure_degrades_to_no_vector(mock_store, mock_load, mock_embed):
+    """Not every FAISS index type supports reconstruct. The guard must fall back
+    to embedding rather than the request failing."""
+    rows = [{"parent_id": 0, "start": 0, "end": len(PASSAGES[0]["text"])}]
+    index = _index_returning([0])
+    index.reconstruct.side_effect = RuntimeError("not supported")
+    mock_load.return_value = (index, rows)
+
+    result = retrieve(query="q", strategy="whole_passage", k=1)
+
+    assert result.passages[0].vector is None
+    assert result.passages[0].text
