@@ -26,14 +26,28 @@ _MAX_TOKENS = 512
 # Constraints) and cannot be mistaken for an answer the way prose can.
 INSUFFICIENT_CONTEXT = "INSUFFICIENT_CONTEXT"
 
+# Brevity is not a style preference here, it is two measured wins.
+#
+# Latency: generation is the largest cost in the pipeline (2.1s to a complete
+# answer against 650ms to first token), and output tokens dominate that. Measured
+# before this instruction, answers ran to a median of 79 words -- roughly 32
+# seconds of synthesised speech for a question a person asked out loud.
+#
+# Groundedness: 35% of measured answers opened with a framing phrase ("Based on
+# the passages provided...", "According to..."). Those sentences correctly match
+# no passage, so they drag down per-sentence support in the groundedness guard
+# and cost real answers a refusal they do not deserve.
 _SYSTEM_PROMPT = (
     "Answer the user's question using ONLY the passages provided below. "
     "Do not use outside knowledge. If the passages do not contain enough "
     f"information to answer, reply with exactly {INSUFFICIENT_CONTEXT} and "
     "nothing else -- no explanation, and do not quote the passages. "
-    "Otherwise this is a voice assistant: respond in plain, natural "
-    "spoken-style prose -- no markdown, no headings, no bullet or numbered "
-    "lists, no asterisks for emphasis."
+    "Otherwise this is a voice assistant, so the answer is spoken aloud: "
+    "answer in at most three short sentences, and stop. "
+    "State the answer directly -- never preface it with 'based on the "
+    "passages', 'according to', or any mention of the passages at all. "
+    "Plain spoken-style prose only: no markdown, no headings, no bullet or "
+    "numbered lists, no asterisks."
 )
 
 
