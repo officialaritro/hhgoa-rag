@@ -34,8 +34,25 @@ logger = logging.getLogger("uvicorn.error")
 
 MODEL_NAME = os.environ.get("RERANK_MODEL_NAME", "cross-encoder/ms-marco-MiniLM-L-6-v2")
 
-# Measured optimum on both axes: best recall@1 and cheapest. See module docstring.
-RERANK_DEPTH = 10
+# Depth is a latency/quality trade measured ON THE INSTANCE (2 vCPU), against a
+# boundary-A cost of 52ms for retrieval plus the groundedness guard, inside the
+# task's 200ms target:
+#
+#   depth  rerank P50   boundary A   recall@5   95% CI vs dense order
+#      5      80.7 ms     132.7 ms      0.848   no gain by construction
+#      6      93.9 ms     145.9 ms      0.886   +0.016 to +0.062
+#      7     118.8 ms     170.8 ms      0.900   +0.026 to +0.078   <- shipped
+#      8     131.2 ms     183.2 ms      0.904   +0.030 to +0.082
+#     10     162.3 ms     214.3 ms      0.916   +0.038 to +0.098   OVER BUDGET
+#
+# Depth 5 cannot help recall@5: reranking the top five cannot change which five
+# are in the top five. Depth 8 fits on paper but leaves nothing for the guard's
+# measured 23-36ms variance. Depth 7 keeps a significant +5.2pp with ~30ms of
+# margin, so that is what ships.
+#
+# Overridable because it is hardware-dependent: on 8 vCPU depth 10 fits
+# comfortably and is worth another 1.6pp, and that should not need a code change.
+RERANK_DEPTH = int(os.environ.get("RERANK_DEPTH", "7"))
 
 _MAX_LENGTH = 512
 

@@ -119,10 +119,29 @@ def test_a_reranker_failure_falls_back_to_dense_order(mock_load):
 
 
 def test_rerank_depth_fits_the_measured_latency_budget():
-    """36ms at depth 10 on CPU, against 70ms already owned by retrieval, query
-    embedding and the groundedness guard, inside a 200ms target. Depth 50 was
-    measured at 164ms and would exceed it."""
-    assert RERANK_DEPTH == 10
+    """Measured on the instance, not extrapolated. Depth 7 costs 118.8ms there
+    against a 52ms boundary-A baseline, landing at 170.8ms inside the 200ms
+    target. Depth 10 measured 162.3ms and lands at 214.3ms, over budget -- so
+    the default must stay at or below 8, and 8 leaves nothing for the guard's
+    23-36ms variance."""
+    assert RERANK_DEPTH <= 8, "default depth would breach the measured budget"
+
+
+def test_rerank_depth_is_overridable_for_faster_hardware(monkeypatch):
+    """The depth that fits is a property of the machine, not of the code. On 8
+    vCPU depth 10 fits and is worth another 1.6pp of recall@5; that should not
+    require a redeploy of code."""
+    import importlib
+
+    monkeypatch.setenv("RERANK_DEPTH", "10")
+    import app.reranking
+
+    importlib.reload(app.reranking)
+    try:
+        assert app.reranking.RERANK_DEPTH == 10
+    finally:
+        monkeypatch.delenv("RERANK_DEPTH", raising=False)
+        importlib.reload(app.reranking)
 
 
 def test_reranking_can_be_disabled_by_environment(monkeypatch):
