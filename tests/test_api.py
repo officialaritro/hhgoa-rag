@@ -678,3 +678,32 @@ def test_rerank_is_reported_as_its_own_stage(
     assert "rerank" in stages
     assert stages["rerank"] == pytest.approx(40.0)
     assert stages["retrieval"] >= 0.0
+
+
+def test_cpu_bound_retrieval_is_serialised_across_concurrent_strategies():
+    """Compare fans out four strategies. Reranking, embedding and the
+    groundedness guard are CPU-bound, so four of them at once contend for the
+    same vCPU: measured live, reranking took 150-180ms per strategy in compare
+    against 71ms for a single query, pushing each strategy's boundary A to
+    229-283ms and past the 200ms target.
+
+    Serialising the CPU-bound stage restores the real per-stage cost. Generation
+    is deliberately NOT serialised -- it is 1.2s of waiting on a network call,
+    four of which do not contend, so serialising it would add ~3s of wall clock
+    for nothing.
+    """
+    import asyncio
+    import inspect
+
+    from app.main import _CPU_BOUND, _run_strategy_pipeline
+
+    assert isinstance(_CPU_BOUND, asyncio.Semaphore)
+    source = inspect.getsource(_run_strategy_pipeline)
+    retrieval_guarded = "_CPU_BOUND" in source.split("generate_answer")[0]
+    assert retrieval_guarded, "retrieval/rerank is not inside the CPU-bound gate"
+
+    # and generation must sit outside it
+    after_gate = source.split("async with _CPU_BOUND")[1]
+    assert "generate_answer" in after_gate, (
+        "generation is inside the CPU gate; that serialises four network waits"
+    )

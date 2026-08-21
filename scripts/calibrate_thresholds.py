@@ -50,10 +50,34 @@ QUERY_VECTORS = "data/calibration_queries.f32"
 # are largely collinear with it.
 OFF_TOPIC_QUERIES = all_probes()
 
-# The p05 of the in-corpus distribution. Set here rather than inline so the
-# choice is visible: a lower percentile refuses fewer real questions and leaks
-# more, and the leak path has two further guards behind it.
-IN_CORPUS_PERCENTILE = 5
+# The percentile of the in-corpus distribution the threshold sits at, which is
+# also the false-refusal rate it accepts by construction.
+#
+# This was 5, and 5 was inconsistent with the guard's own stated priority: a
+# refused real question is the damaging, unrecoverable failure, while off-topic
+# input that slips through still faces the generation prompt's decline sentinel
+# and the groundedness guard. Accepting 5% of the damaging failure to avoid the
+# recoverable one is the wrong way round -- and it showed, refusing "what is the
+# capital of France?" on the live service at 0.5635 against a 0.5643 threshold.
+#
+# Measured trade, 400 in-corpus queries against 50 off-topic probes:
+#
+#   pct  threshold  refused  leaks past gate 1   leaks past gate 2
+#     5     0.5587     5.0%             6 / 50                  --
+#     3     0.5204     3.0%            15 / 50               0 / 15
+#     2     0.5068     2.0%            18 / 50                  --
+#     1     0.4623     1.0%            28 / 50                  --
+#
+# The last column is the one that decides it, and it had never been measured
+# before: every one of the 15 probes that leaks past the off-topic gate at p3 is
+# caught by the decline sentinel. So the system refuses 100% of off-topic input
+# at either setting, and p3 refuses 40% fewer real questions to do it.
+#
+# Not lowered further than 3. Below that the first gate stops doing most of the
+# work, and the sentinel is a prompt-compliance contract -- a model upgrade or a
+# prompt edit could weaken it, and defence in depth should not become defence in
+# one layer.
+IN_CORPUS_PERCENTILE = 3
 
 
 def percentile(values: list[float], p: float) -> float:

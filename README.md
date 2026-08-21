@@ -108,14 +108,19 @@ where time goes. Measured against the **live deployment**, 30 real spoken-audio 
 
 | Boundary | Covers | P50 | P70 | P100 | Under 200ms |
 |---|---|---|---|---|---|
-| **A** | Retrieval, reranking, all guardrails | **84.7ms** | **96.3ms** | **115.7ms** | **Yes** |
-| B | A + answer generation (Claude) | 1,328ms | 1,483ms | 3,165ms | No |
+| **A** | Retrieval, reranking, all guardrails | **95.9ms** | **99.7ms** | **121.6ms** | **Yes** |
+| B | A + answer generation (Claude) | 1,425ms | 1,585ms | 3,196ms | No |
 | C | Full voice-to-answer, incl. speech-to-text | 2,655ms | 2,830ms | 4,369ms | No |
 
-**Boundary A clears the target at every percentile with 42% headroom — while carrying a
-cross-encoder it did not have before.** It is 34% faster than the previous measurement,
+**Boundary A clears the target at every percentile with 39% headroom — while carrying a
+cross-encoder it did not have before.** It is 26% faster than the previous measurement,
 because the groundedness guard stopped re-embedding vectors retrieval had already computed
-(110.7ms → 11.8ms) and answers got shorter (generation 2,108ms → 1,235ms).
+(110.7ms → 12.1ms) and answers got shorter (generation 2,108ms → 1,329ms).
+
+These are `/api/ask` figures. `/api/compare` runs the pipeline four times over one
+transcription and does **not** meet the target — 120–290ms per strategy, since reranking is
+CPU-bound and the endpoint contends with itself. `docs/LATENCY_REPORT.md` explains what was
+done about that and what deliberately was not.
 
 B and C don't clear it and can't: Claude's generation floor is ~650ms to first token and
 ElevenLabs' STT floor ~1.1s, both measured independently and provider-bound.

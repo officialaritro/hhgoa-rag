@@ -22,12 +22,12 @@ single figure would hide where the time actually goes.
 
 | Boundary | What it covers | P50 | P70 | P100 | Under 200 ms |
 |---|---|---|---|---|---|
-| **A** | Retrieval, reranking, and all three guardrails | **84.7 ms** | **96.3 ms** | **115.7 ms** | **Yes — all three** |
+| **A** | Retrieval, reranking, and all three guardrails | **95.9 ms** | **99.7 ms** | **121.6 ms** | **Yes — all three** |
 | **B** | A + answer generation (Claude) | 1,328 ms | 1,483 ms | 3,165 ms | No |
 | **C** | Full end-to-end, incl. speech-to-text | 2,655 ms | 2,830 ms | 4,369 ms | No |
 
 **Boundary A — the retrieval pipeline this task is about — meets the 200 ms target at P50,
-P70 and P100**, with 42% headroom even at the worst case.
+P70 and P100**, with 39% headroom even at the worst case.
 
 Boundaries B and C do not, and cannot. The reasons are external and quantified below.
 
@@ -39,11 +39,12 @@ fall outside the boundary this claim is made against.
 
 | Stage | P50 | In our control |
 |---|---|---|
-| Speech-to-text (ElevenLabs) | 1,112.1 ms | No — third-party |
+| Speech-to-text (ElevenLabs) | 1,065.1 ms | No — third-party |
 | Unsafe-input guardrail | 0.04 ms | Yes |
-| **Retrieval + reranking** | **73.4 ms** | Yes |
+| Retrieval (embed + FAISS) | 14.1 ms | Yes |
+| **Reranking (cross-encoder)** | **69.3 ms** | Yes |
 | Off-topic guardrail | 0.02 ms | Yes |
-| Answer generation (Claude Haiku 4.5) | 1,235.2 ms | No — third-party |
+| Answer generation (Claude Haiku 4.5) | 1,328.6 ms | No — third-party |
 | **Groundedness guardrail** | **11.8 ms** | Yes |
 
 ## What changed since the previous report
@@ -57,8 +58,8 @@ comparing against directly.
 | Retrieval | 19.6 ms | 73.4 ms | now includes cross-encoder reranking |
 | Groundedness guard | 110.7 ms | **11.8 ms** | **9.4× faster** |
 | Answer generation | 2,108 ms | **1,235 ms** | **41% faster** |
-| **Boundary A P50** | 129.3 ms | **84.7 ms** | **34% faster** |
-| **Boundary A P100** | 147.3 ms | **115.7 ms** | **21% faster** |
+| **Boundary A P50** | 129.3 ms | **95.9 ms** | **26% faster** |
+| **Boundary A P100** | 147.3 ms | **121.6 ms** | **17% faster** |
 
 **Boundary A got faster while gaining a cross-encoder reranker**, which is the part worth
 explaining. Three separate changes:
@@ -92,11 +93,35 @@ instance, depth 10 measured 162 ms in isolation but **124–227 ms in the live s
 boundary A breached 200 ms on 3 of 5 requests. Real passages vary from ~100 to 1,233
 characters where an isolated probe used one short document repeated, and the reranker
 shares CPU with the embedding model and the web server. On 8 vCPU depth 10 fits with room:
-retrieval and reranking together are 73.4 ms at P50.
+retrieval and reranking together are 83.4 ms at P50.
 
 `RERANK_ENABLED=0` disables it and returns boundary A to ~50 ms P50, at the cost of the
 recall gain. `RERANK_DEPTH` is also environment-settable, because the depth that fits is a
 property of the hardware rather than of the code.
+
+## The figures above are for `/api/ask`. `/api/compare` does not meet them
+
+`/api/compare` answers one spoken question against four strategies from a single
+transcription. It therefore runs the pipeline four times, and reranking is CPU-bound, so
+the endpoint contends with itself. Measured warm, per-strategy boundary A there is
+**120–290 ms depending on the question**, because cross-encoder cost tracks the length of
+the passages it scores.
+
+Two things were done about it and one was not:
+
+- Retrieval and the groundedness guard now run under a shared semaphore, so one CPU-bound
+  stage runs at a time. Before that, per-strategy boundary A measured 229–283 ms with
+  reranking at 150–180 ms against 69 ms for a single query.
+- The compared strategies are warmed at startup. Their indices otherwise load on first use,
+  and the first comparison after a restart took 6.2 s and reported retrieval of 121–213 ms
+  against 14–50 ms warm.
+- Reranking is **not** reduced or disabled for this endpoint. It could be, and boundary A
+  would then clear 200 ms — but the comparison would stop reflecting what the service
+  actually does for a real request, which is the only thing it is useful for.
+
+So the honest statement: **the 200 ms target is met by the endpoint that answers a
+question.** The comparison view is a diagnostic that deliberately does four times the work,
+and its per-strategy stage timings include self-contention no real request experiences.
 
 ## Why B and C cannot reach 200 ms
 
@@ -108,7 +133,7 @@ Measured from the instance itself, independent of this pipeline:
 - **Speech-to-text floor.** ~1.1 s per clip. `api.elevenlabs.io` has a ~350 ms origin
   round-trip from Mumbai; the rest is the WebSocket handshake, audio upload and commit.
 
-Both are provider-bound. Every locally controllable stage sums to ~85 ms.
+Both are provider-bound. Every locally controllable stage sums to ~96 ms.
 
 ## Known headroom, not claimed as achieved
 
