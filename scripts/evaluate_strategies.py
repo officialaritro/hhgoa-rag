@@ -68,6 +68,14 @@ def _relevance(ranked: list[str], labelled: list[str], k: int) -> list[int]:
     return [1 if is_hit(labelled, source) else 0 for source in ranked[:k]]
 
 
+def per_query_hits(queries: list[tuple[list[str], list[str]]], k: int) -> list[int]:
+    """One outcome per query, so comparisons can be bootstrapped pairwise. An
+    aggregate alone cannot tell a real difference from three lucky queries."""
+    return [
+        1 if any(_relevance(ranked, labelled, k)) else 0 for ranked, labelled in queries
+    ]
+
+
 def recall_at_k(queries: list[tuple[list[str], list[str]]], k: int) -> float:
     """Share of queries with at least one labelled passage inside the top k."""
     if not queries:
@@ -230,6 +238,7 @@ def _phase_measure() -> None:
                     "false_refusal_rate"
                 ),
                 "leaks": manifest.get("calibration", {}).get("off_topic_leaks"),
+                "hits@5": per_query_hits(per_query, 5),
                 "recall@1": recall_at_k(per_query, 1),
                 "recall@5": recall_at_k(per_query, 5),
                 "recall@10": recall_at_k(per_query, 10),
@@ -285,6 +294,7 @@ def _phase_measure() -> None:
                 "threshold": None,
                 "false_refusal": None,
                 "leaks": None,
+                "hits@5": per_query_hits(per_query, 5),
                 "recall@1": recall_at_k(per_query, 1),
                 "recall@5": recall_at_k(per_query, 5),
                 "recall@10": recall_at_k(per_query, 10),
@@ -388,13 +398,24 @@ def write_report() -> None:
         "See the note below the table -- this was the single most misleading result in the",
         "set, and it was wrong in both directions before being pinned down.",
         "",
-        "**Fusing granularities is the only thing that beat a plain passage.** `fusion`",
-        "merges whole passages, 200-character children and single sentences by reciprocal",
-        "rank and reaches 0.854 recall@5, the best number here. The margin over",
-        "`whole_passage` is 0.6 points, which on 500 queries is three queries -- real but",
-        "small, and it costs 45 ms of search against 6.7 ms. Members were chosen for",
-        "diversity of failure mode rather than individual score: fusing the three",
-        "strategies that already tie each other would have added nothing.",
+        "**Nothing in the chunking slate beats a plain passage.** Not one strategy, and",
+        "neither fusion mode. `fusion` posts the highest point estimate at 0.854 recall@5,",
+        "but its paired 95% interval against `whole_passage` is -0.016 to +0.028 -- it",
+        "contains zero. Three queries out of 500 is not a result. The same is true of the",
+        "`query_aware_heldout` control at 0.850 (-0.012 to +0.016).",
+        "",
+        'This is a correction to an earlier draft of this report, which called fusion "the',
+        'only thing that beat a plain passage". The point estimates said so; the intervals',
+        "do not. Every comparison here now carries one, computed by paired bootstrap over",
+        "the same queries (scripts/significance.py).",
+        "",
+        "What the intervals establish, rather than suggest:",
+        "",
+        "- **statistically indistinguishable from no chunking at all:** `fixed_size`,",
+        "  `recursive`, `fusion`, `query_aware_heldout`, and marginally `parent_child`",
+        "- **significantly worse:** `semantic`, `sentence_window`, `query_aware`,",
+        "  `hybrid`, `query_group`",
+        "- **significantly better:** nothing on this axis. Only reranking, below.",
         "",
         "**Lexical fusion is a negative result.** `hybrid` scores 0.740, ten points *below*",
         "dense alone. BM25 by itself reaches only 0.558, and a weight sweep shows fusion",
@@ -421,24 +442,36 @@ def write_report() -> None:
         "tuned stemming and stopword handling; neither is present here, and at a 0.558",
         "starting point preprocessing would not close a 29-point gap.",
         "",
-        "**Recommended default: `whole_passage` or `fixed_size`.** Tied-best recall among",
-        "the single strategies, essentially tied-best MRR, the smallest competitive index,",
-        "6.7 ms search, and the fewest off-topic leaks (1 of 8). They are interchangeable,",
-        "which is the first finding restated. `fusion` is the quality ceiling if 45 ms of",
-        "search is acceptable, but 0.854 against 0.848 does not justify making it the",
-        "default for a voice demo where the dominant cost is elsewhere entirely.",
+        "**Recommended default: `whole_passage`.** Nothing measurably beats it, it is the",
+        "smallest competitive index at 38.3 MB, the fastest competitive search at 6.7 ms,",
+        "and it has the fewest off-topic leaks (1 of 8). `fusion` costs 45 ms of search to",
+        "buy a difference the data cannot distinguish from zero.",
         "",
         "## Retrieval quality",
         "",
-        ("| strategy | axis | recall@1 | recall@5 | recall@10 | MRR@10 | nDCG@10 |"),
-        ("|---|---|---|---|---|---|---|"),
+        (
+            "| strategy | axis | recall@1 | recall@5 | recall@10 | MRR@10 | nDCG@10 "
+            "| vs `whole_passage`, 95% CI |"
+        ),
+        ("|---|---|---|---|---|---|---|---|"),
     ]
+    from scripts.significance import describe, paired_bootstrap
+
+    baseline_hits = next(
+        (r["hits@5"] for r in results if r["strategy"] == "whole_passage"), None
+    )
     for r in results:
         star = " \\*" if r["held_out"] else ""
+        verdict = "-"
+        if baseline_hits and r.get("hits@5") and r["strategy"] != "whole_passage":
+            low, high = paired_bootstrap(baseline_hits, r["hits@5"], seed=0)
+            verdict = f"{low:+.3f} to {high:+.3f}, {describe(low, high)}"
+        elif r["strategy"] == "whole_passage":
+            verdict = "*baseline*"
         lines.append(
             f"| `{r['strategy']}`{star} | {r['axis']} | {r['recall@1']:.3f} | "
             f"**{r['recall@5']:.3f}** | {r['recall@10']:.3f} | {r['mrr@10']:.3f} | "
-            f"{r['ndcg@10']:.3f} |"
+            f"{r['ndcg@10']:.3f} | {verdict} |"
         )
     lines += [
         "",

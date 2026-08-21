@@ -90,6 +90,17 @@ def _recall(ranked: list[list[str]], labels: list[list[str]], k: int) -> float:
     return hits / len(ranked) if ranked else 0.0
 
 
+def _hits(ranked: list[list[str]], labels: list[list[str]], k: int) -> list[int]:
+    """Per-query outcomes, for the paired bootstrap. The +6.8pp headline needs an
+    interval, not a point estimate -- that is how the fusion result went wrong."""
+    return [
+        1
+        if any(any(lab == s or lab in s for lab in labelled) for s in sources[:k])
+        else 0
+        for sources, labelled in zip(ranked, labels)
+    ]
+
+
 def _mrr(ranked: list[list[str]], labels: list[list[str]], k: int) -> float:
     total = 0.0
     for sources, labelled in zip(ranked, labels):
@@ -143,12 +154,22 @@ def _phase_rerank(depths: list[int], device: str) -> None:
             "recall@5": _recall(reordered, labels, 5),
             "mrr@10": _mrr(reordered, labels, 10),
             "rerank_ms_p50": statistics.median(latencies),
+            "hits@5": _hits(reordered, labels, 5),
+            "hits@1": _hits(reordered, labels, 1),
         }
         results.append(row)
         print(
             f"{depth:>6}{row['recall@1']:>11.3f}{row['recall@5']:>10.3f}"
             f"{row['mrr@10']:>9.3f}{row['rerank_ms_p50']:>11.1f} ms"
         )
+
+    from scripts.significance import describe, paired_bootstrap
+
+    print(f"\n{'depth':>6}  paired 95% CI on recall@5 against dense order")
+    print("-" * 56)
+    for row in results:
+        low, high = paired_bootstrap(_hits(baseline, labels, 5), row["hits@5"], seed=0)
+        print(f"{row['depth']:>6}  {low:+.3f} to {high:+.3f}   {describe(low, high)}")
 
     best = max(results, key=lambda r: r["recall@1"])
     lift = best["recall@1"] - _recall(baseline, labels, 1)
@@ -164,6 +185,8 @@ def _phase_rerank(depths: list[int], device: str) -> None:
                 "baseline_recall@1": _recall(baseline, labels, 1),
                 "baseline_recall@5": _recall(baseline, labels, 5),
                 "baseline_mrr@10": _mrr(baseline, labels, 10),
+                "baseline_hits@5": _hits(baseline, labels, 5),
+                "baseline_hits@1": _hits(baseline, labels, 1),
                 "reranked": results,
             },
             indent=2,
