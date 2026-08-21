@@ -59,34 +59,64 @@ def test_check_unsafe_input_passes_benign_transcript():
     assert result.reason is None
 
 
-@patch("app.guardrails.embed")
-def test_check_groundedness_passes_when_similarity_above_threshold(mock_embed):
-    mock_embed.side_effect = lambda text: {"a": 1.0, "c": 1.0}.get(text[0], 1.0)
+@patch("app.guardrails.sentence_support")
+def test_check_groundedness_passes_when_mean_support_is_above_threshold(mock_support):
+    mock_support.return_value = [0.8, 0.7, 0.9]
 
-    with patch("app.guardrails.cosine_similarity", return_value=0.9):
-        result = check_groundedness(
-            answer="The Manhattan Project produced nuclear weapons.",
-            retrieval=_retrieval(),
-            threshold=0.5,
-        )
+    result = check_groundedness(
+        answer="The Manhattan Project produced nuclear weapons.",
+        retrieval=_retrieval(),
+        threshold=0.5,
+    )
 
     assert result.passed is True
     assert result.reason is None
 
 
-@patch("app.guardrails.embed")
-def test_check_groundedness_flags_when_similarity_below_threshold(mock_embed):
-    mock_embed.return_value = None
+@patch("app.guardrails.sentence_support")
+def test_check_groundedness_flags_when_mean_support_is_below_threshold(mock_support):
+    mock_support.return_value = [0.1, 0.2, 0.05]
 
-    with patch("app.guardrails.cosine_similarity", return_value=0.1):
-        result = check_groundedness(
-            answer="Bananas are a good source of potassium.",
-            retrieval=_retrieval(),
-            threshold=0.5,
-        )
+    result = check_groundedness(
+        answer="Bananas are a good source of potassium.",
+        retrieval=_retrieval(),
+        threshold=0.5,
+    )
 
     assert result.passed is False
     assert result.reason == "ungrounded"
+
+
+@patch("app.guardrails.sentence_support")
+def test_check_groundedness_flags_a_fabricated_figure_despite_high_support(
+    mock_support,
+):
+    """The failure the previous guard could not catch at all. A wrong date is one
+    digit away from the truth and semantically identical, so the semantic score
+    stays high while the answer is false."""
+    mock_support.return_value = [0.9, 0.9]
+
+    result = check_groundedness(
+        answer="The project began in 1987 and ended later.",
+        retrieval=_retrieval(),
+        threshold=0.5,
+    )
+
+    assert result.passed is False
+    assert "1987" in result.reason
+
+
+@patch("app.guardrails.sentence_support")
+def test_check_groundedness_refuses_when_there_is_nothing_to_ground_against(
+    mock_support,
+):
+    mock_support.return_value = []
+
+    result = check_groundedness(
+        answer="anything", retrieval=_retrieval(), threshold=0.5
+    )
+
+    assert result.passed is False
 
 
 # Thresholds are read at import time, so these exercise the reader directly

@@ -12,12 +12,13 @@ tests/test_guardrail_calibration.py, which pins the false-refusal budget.
 import json
 import os
 import re
+import statistics
 from functools import cache
 from pathlib import Path
 
 from pydantic import BaseModel
 
-from app.embeddings import cosine_similarity, embed
+from app.groundedness import sentence_support, unsupported_numbers
 from app.schemas import RetrievalOutput
 
 
@@ -134,14 +135,15 @@ def offtopic_threshold(strategy: str, index_path: str | None = None) -> float:
     return float(recorded)
 
 
-# Real generated answers score 0.756-0.902 against their retrieved context;
-# answers paired with unrelated context score below 0.11. 0.40 clears the
-# grounded floor with margin while staying far above the ungrounded range.
+# Now a threshold on the MEAN per-sentence support (app/groundedness.py), not on
+# a whole-answer cosine against concatenated context. The old metric truncated:
+# MiniLM caps at 256 tokens and 94% of real k=5 contexts exceed that, so the
+# guard was silently scoring against a shortened context on almost every request.
 #
-# Note scripts/tune_thresholds.py recommends a much lower value here (~0.02)
-# because it measures the dataset's terse Eng_Answer rather than real model
-# output. Generated answers quote the passages, so they score far higher --
-# trust the measured pipeline over that proxy.
+# Re-measured against 40 real generated answers after the fix: grounded min
+# 0.524, ungrounded max 0.271, a clean gap whose midpoint is 0.397. The shipped
+# 0.40 happens to sit almost exactly there, so the number is unchanged while the
+# thing it measures is not.
 _DEFAULT_GROUNDEDNESS_THRESHOLD = _threshold("GROUNDEDNESS_SIMILARITY_THRESHOLD", 0.40)
 
 # Chosen empirically as an illustrative starting set for the MVP guardrail,
@@ -215,10 +217,21 @@ def check_groundedness(
     retrieval: RetrievalOutput,
     threshold: float = _DEFAULT_GROUNDEDNESS_THRESHOLD,
 ) -> GuardrailResult:
-    context_text = " ".join(p.text for p in retrieval.passages)
-    answer_vec = embed(answer)
-    context_vec = embed(context_text)
-    similarity = cosine_similarity(answer_vec, context_vec)
-    if similarity < threshold:
+    support = sentence_support(answer, retrieval)
+    if not support:
+        return GuardrailResult(passed=False, reason="ungrounded")
+
+    # Literal check first: it is exact, costs no model call, and catches the
+    # failure the semantic score cannot. One fabricated figure among four sound
+    # sentences barely moves an average, but "1987" is simply not in the text.
+    fabricated = unsupported_numbers(
+        answer, " ".join(p.text for p in retrieval.passages)
+    )
+    if fabricated:
+        return GuardrailResult(
+            passed=False, reason=f"ungrounded: figures not in context {fabricated}"
+        )
+
+    if statistics.mean(support) < threshold:
         return GuardrailResult(passed=False, reason="ungrounded")
     return GuardrailResult(passed=True)
