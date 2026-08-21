@@ -136,7 +136,12 @@ async def _run_strategy_pipeline(transcript: str, strategy: str) -> dict[str, An
     passages = [p.model_dump() for p in retrieval.passages]
 
     mark = time.perf_counter()
-    top_score = retrieval.passages[0].score if retrieval.passages else 0.0
+    # max, not passages[0]: the reranker reorders by cross-encoder relevance, so
+    # the first passage is no longer necessarily the highest cosine. The guard
+    # asks "is anything in the corpus close enough to this question", which is a
+    # max over the candidates -- reading position zero would let a reranker
+    # promotion cause a false refusal.
+    top_score = max((p.score for p in retrieval.passages), default=0.0)
     off_topic = check_off_topic(top_similarity_score=top_score, strategy=strategy)
     stages["guardrail_off_topic"] = _elapsed_ms(mark)
     if not off_topic.passed:

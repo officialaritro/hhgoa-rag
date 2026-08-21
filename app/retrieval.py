@@ -25,6 +25,7 @@ from app.fusion import reciprocal_rank_fusion
 from app.indexing import load_index
 from app.lexical import BM25Index
 from app.passages import load_passage_store, resolve_text
+from app.reranking import RERANK_DEPTH, rerank_passages, reranking_enabled
 from app.schemas import RetrievalOutput, RetrievedPassage
 from app.strategies import chunk_paths, dense_names, get
 
@@ -139,7 +140,7 @@ def retrieve(query: str, strategy: str, k: int = 5) -> RetrievalOutput:
     passages = _load_passages()
 
     query_vector = np.array([embed(query)], dtype="float32")
-    scores, indices = index.search(query_vector, k * OVERFETCH)
+    scores, indices = index.search(query_vector, max(k, RERANK_DEPTH) * OVERFETCH)
 
     seen_parents: set[int] = set()
     found: list[RetrievedPassage] = []
@@ -168,7 +169,15 @@ def retrieve(query: str, strategy: str, k: int = 5) -> RetrievalOutput:
                 score=float(score),
             )
         )
-        if len(found) >= k:
+        # Collect a deeper pool than the caller asked for: the reranker's gain
+        # comes from reordering candidates that dense order put below k, so
+        # truncating here first would discard exactly what it promotes.
+        if len(found) >= max(k, RERANK_DEPTH):
             break
+
+    if reranking_enabled():
+        found = rerank_passages(query, found, top_k=k)
+    else:
+        found = found[:k]
 
     return RetrievalOutput(query=query, strategy=strategy, passages=found)

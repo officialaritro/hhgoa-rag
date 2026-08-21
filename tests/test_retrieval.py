@@ -29,6 +29,19 @@ def _clear_caches():
     _load_passages.cache_clear()
 
 
+@pytest.fixture(autouse=True)
+def _no_reranker(request, monkeypatch):
+    """Reranking is on by default in production, so an unmocked retrieve() here
+    would download and load a 90MB cross-encoder -- turning unit tests into
+    network-dependent integration tests and tripling the suite runtime.
+
+    Tests that are specifically about reranking opt back in by name.
+    """
+    if "rerank" in request.node.name:
+        return
+    monkeypatch.setattr("app.retrieval.reranking_enabled", lambda: False)
+
+
 PASSAGES = [
     {
         "text": "Alpha sentence. Beta sentence. Gamma sentence.",
@@ -380,3 +393,47 @@ def test_composed_strategies_return_the_parent_passage_as_text(
 
     assert result.passages[0].text == PASSAGES[0]["text"]
     assert result.passages[0].source_passage == PASSAGES[0]["text"]
+
+
+# ----------------------------------------------------------------- reranking
+
+
+@patch("app.retrieval.embed", return_value=np.zeros(3))
+@patch("app.retrieval.load_index")
+@patch("app.retrieval.load_passage_store", return_value=PASSAGES)
+@patch("app.retrieval.rerank_passages")
+def test_dense_retrieval_reranks_before_truncating_to_k(
+    mock_rerank, mock_store, mock_load, mock_embed
+):
+    """The reranker must see more candidates than the caller asked for. Handing
+    it only k would leave it nothing to promote -- the measured gain comes from
+    reordering a deeper pool."""
+    rows = [
+        {"parent_id": 0, "start": 0, "end": 15},
+        {"parent_id": 1, "start": 0, "end": 36},
+    ]
+    mock_load.return_value = (_index_returning([0, 1]), rows)
+    mock_rerank.side_effect = lambda q, ps, top_k: ps[:top_k]
+
+    retrieve(query="q", strategy="whole_passage", k=1)
+
+    handed_to_reranker = mock_rerank.call_args.args[1]
+    assert len(handed_to_reranker) > 1, "reranker received only the final k"
+    assert mock_rerank.call_args.kwargs["top_k"] == 1
+
+
+@patch("app.retrieval.embed", return_value=np.zeros(3))
+@patch("app.retrieval.load_index")
+@patch("app.retrieval.load_passage_store", return_value=PASSAGES)
+@patch("app.retrieval.reranking_enabled", return_value=False)
+@patch("app.retrieval.rerank_passages")
+def test_reranking_can_be_switched_off(
+    mock_rerank, mock_enabled, mock_store, mock_load, mock_embed
+):
+    rows = [{"parent_id": 0, "start": 0, "end": 15}]
+    mock_load.return_value = (_index_returning([0]), rows)
+
+    result = retrieve(query="q", strategy="whole_passage", k=1)
+
+    mock_rerank.assert_not_called()
+    assert len(result.passages) == 1
