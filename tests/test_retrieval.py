@@ -29,6 +29,19 @@ def _clear_caches():
     _load_passages.cache_clear()
 
 
+@pytest.fixture(autouse=True)
+def _no_reranker(request, monkeypatch):
+    """Reranking is on by default in production, so an unmocked retrieve() here
+    would download and load a 90MB cross-encoder -- turning unit tests into
+    network-dependent integration tests and tripling the suite runtime.
+
+    Tests that are specifically about reranking opt back in by name.
+    """
+    if "rerank" in request.node.name:
+        return
+    monkeypatch.setattr("app.retrieval.reranking_enabled", lambda: False)
+
+
 PASSAGES = [
     {
         "text": "Alpha sentence. Beta sentence. Gamma sentence.",
@@ -380,3 +393,149 @@ def test_composed_strategies_return_the_parent_passage_as_text(
 
     assert result.passages[0].text == PASSAGES[0]["text"]
     assert result.passages[0].source_passage == PASSAGES[0]["text"]
+
+
+# ----------------------------------------------------------------- reranking
+
+
+@patch("app.retrieval.embed", return_value=np.zeros(3))
+@patch("app.retrieval.load_index")
+@patch("app.retrieval.load_passage_store", return_value=PASSAGES)
+@patch("app.retrieval.rerank_passages")
+def test_dense_retrieval_reranks_before_truncating_to_k(
+    mock_rerank, mock_store, mock_load, mock_embed
+):
+    """The reranker must see more candidates than the caller asked for. Handing
+    it only k would leave it nothing to promote -- the measured gain comes from
+    reordering a deeper pool."""
+    rows = [
+        {"parent_id": 0, "start": 0, "end": 15},
+        {"parent_id": 1, "start": 0, "end": 36},
+    ]
+    mock_load.return_value = (_index_returning([0, 1]), rows)
+    mock_rerank.side_effect = lambda q, ps, top_k: ps[:top_k]
+
+    retrieve(query="q", strategy="whole_passage", k=1)
+
+    handed_to_reranker = mock_rerank.call_args.args[1]
+    assert len(handed_to_reranker) > 1, "reranker received only the final k"
+    assert mock_rerank.call_args.kwargs["top_k"] == 1
+
+
+@patch("app.retrieval.embed", return_value=np.zeros(3))
+@patch("app.retrieval.load_index")
+@patch("app.retrieval.load_passage_store", return_value=PASSAGES)
+@patch("app.retrieval.reranking_enabled", return_value=False)
+@patch("app.retrieval.rerank_passages")
+def test_reranking_can_be_switched_off(
+    mock_rerank, mock_enabled, mock_store, mock_load, mock_embed
+):
+    rows = [{"parent_id": 0, "start": 0, "end": 15}]
+    mock_load.return_value = (_index_returning([0]), rows)
+
+    result = retrieve(query="q", strategy="whole_passage", k=1)
+
+    mock_rerank.assert_not_called()
+    assert len(result.passages) == 1
+
+
+# ------------------------------- handing the guard vectors it already computed
+
+
+@patch("app.retrieval.embed", return_value=np.zeros(3))
+@patch("app.retrieval.load_index")
+@patch("app.retrieval.load_passage_store", return_value=PASSAGES)
+def test_supplies_the_index_vector_when_return_span_equals_embed_span(
+    mock_store, mock_load, mock_embed
+):
+    """whole_passage embeds and returns the same text, so its index vector IS the
+    vector of what it returns. Handing it to the groundedness guard removes five
+    embeddings from every request -- that guard measured 170ms on the instance
+    and pushed boundary A past 200ms."""
+    rows = [{"parent_id": 0, "start": 0, "end": len(PASSAGES[0]["text"])}]
+    index = _index_returning([0])
+    index.reconstruct.return_value = np.array([0.1, 0.2, 0.3], dtype="float32")
+    mock_load.return_value = (index, rows)
+
+    result = retrieve(query="q", strategy="whole_passage", k=1)
+
+    assert result.passages[0].vector == pytest.approx([0.1, 0.2, 0.3])
+
+
+@patch("app.retrieval.embed", return_value=np.zeros(3))
+@patch("app.retrieval.load_index")
+@patch("app.retrieval.load_passage_store", return_value=PASSAGES)
+def test_supplies_no_vector_when_the_returned_text_is_wider(
+    mock_store, mock_load, mock_embed
+):
+    """sentence_window returns a window around the sentence it embedded, so the
+    index vector is the wrong text. Supplying it would score the answer against
+    something the user never saw."""
+    rows = [
+        {
+            "parent_id": 0,
+            "start": 16,
+            "end": 30,
+            "ret_start": 0,
+            "ret_end": len(PASSAGES[0]["text"]),
+        }
+    ]
+    mock_load.return_value = (_index_returning([0]), rows)
+
+    result = retrieve(query="q", strategy="sentence_window", k=1)
+
+    assert result.passages[0].vector is None
+
+
+@patch("app.retrieval.embed", return_value=np.zeros(3))
+@patch("app.retrieval.load_index")
+@patch("app.retrieval.load_passage_store", return_value=PASSAGES)
+def test_supplies_no_vector_for_a_query_enriched_chunk(
+    mock_store, mock_load, mock_embed
+):
+    """query_aware's index vector contains the gold query prepended, but it
+    returns the passage bare. Reusing it would score the answer against a
+    different string than the one shown."""
+    rows = [
+        {
+            "parent_id": 0,
+            "start": 0,
+            "end": len(PASSAGES[0]["text"]),
+            "embed_query": True,
+        }
+    ]
+    mock_load.return_value = (_index_returning([0]), rows)
+
+    result = retrieve(query="q", strategy="query_aware", k=1)
+
+    assert result.passages[0].vector is None
+
+
+@patch("app.retrieval.embed", return_value=np.zeros(3))
+@patch("app.retrieval.load_index")
+@patch("app.retrieval.load_passage_store", return_value=PASSAGES)
+def test_supplies_no_vector_for_a_stored_text_chunk(mock_store, mock_load, mock_embed):
+    """query_group concatenates across passages; nothing in the index is that."""
+    rows = [{"parent_id": 0, "start": 0, "end": 0, "text": "spans two passages"}]
+    mock_load.return_value = (_index_returning([0]), rows)
+
+    result = retrieve(query="q", strategy="query_group", k=1)
+
+    assert result.passages[0].vector is None
+
+
+@patch("app.retrieval.embed", return_value=np.zeros(3))
+@patch("app.retrieval.load_index")
+@patch("app.retrieval.load_passage_store", return_value=PASSAGES)
+def test_a_reconstruct_failure_degrades_to_no_vector(mock_store, mock_load, mock_embed):
+    """Not every FAISS index type supports reconstruct. The guard must fall back
+    to embedding rather than the request failing."""
+    rows = [{"parent_id": 0, "start": 0, "end": len(PASSAGES[0]["text"])}]
+    index = _index_returning([0])
+    index.reconstruct.side_effect = RuntimeError("not supported")
+    mock_load.return_value = (index, rows)
+
+    result = retrieve(query="q", strategy="whole_passage", k=1)
+
+    assert result.passages[0].vector is None
+    assert result.passages[0].text

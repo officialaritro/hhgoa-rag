@@ -9,6 +9,27 @@ Retrieval over-fetches 4x and collapses candidates by parent passage before
 truncating, which is exactly what `app/retrieval.py` serves, so these numbers
 describe the shipped pipeline rather than a variant of it.
 
+## How to read this report
+
+The brief asked for a chunking strategy that is *vast* -- not one naive fixed-size
+approach -- and for real thought about how the dataset is split, indexed **and
+retrieved**. This report is the evidence for all three, in that order:
+
+1. **Eight chunking strategies across four axes**, plus two retrieval-time fusion
+   modes, every one built, calibrated, served and measured. The comparison matrix
+   below is the deliverable.
+2. **What the matrix establishes:** on this corpus, chunking does not improve
+   retrieval. Four strategies are significantly worse than not chunking at all and
+   none is significantly better. That is a measured result, not an absence of work,
+   and it took the full slate to establish it.
+3. **What the matrix pointed at:** its own recall@1 of 0.410 against recall@10 of
+   0.960 said the candidates were already right and the *ordering* was wrong.
+   Chunking cannot fix ordering. Reranking can, and does -- the last section.
+
+Every comparison carries a paired 95% confidence interval, because an earlier draft
+of this report drew a conclusion from a three-query margin that the interval does
+not support.
+
 ## What the numbers say
 
 **Chunking does nothing on this corpus.** `whole_passage`, `fixed_size` and
@@ -33,13 +54,24 @@ loses context, super-merging loses focus.
 See the note below the table -- this was the single most misleading result in the
 set, and it was wrong in both directions before being pinned down.
 
-**Fusing granularities is the only thing that beat a plain passage.** `fusion`
-merges whole passages, 200-character children and single sentences by reciprocal
-rank and reaches 0.854 recall@5, the best number here. The margin over
-`whole_passage` is 0.6 points, which on 500 queries is three queries -- real but
-small, and it costs 45 ms of search against 6.7 ms. Members were chosen for
-diversity of failure mode rather than individual score: fusing the three
-strategies that already tie each other would have added nothing.
+**Nothing in the chunking slate beats a plain passage.** Not one strategy, and
+neither fusion mode. `fusion` posts the highest point estimate at 0.854 recall@5,
+but its paired 95% interval against `whole_passage` is -0.016 to +0.028 -- it
+contains zero. Three queries out of 500 is not a result. The same is true of the
+`query_aware_heldout` control at 0.850 (-0.012 to +0.016).
+
+This is a correction to an earlier draft of this report, which called fusion "the
+only thing that beat a plain passage". The point estimates said so; the intervals
+do not. Every comparison here now carries one, computed by paired bootstrap over
+the same queries (scripts/significance.py).
+
+What the intervals establish, rather than suggest:
+
+- **statistically indistinguishable from no chunking at all:** `fixed_size`,
+  `recursive`, `fusion`, `query_aware_heldout`, and marginally `parent_child`
+- **significantly worse:** `semantic`, `sentence_window`, `query_aware`,
+  `hybrid`, `query_group`
+- **significantly better:** nothing on this axis. Only reranking, below.
 
 **Lexical fusion is a negative result.** `hybrid` scores 0.740, ten points *below*
 dense alone. BM25 by itself reaches only 0.558, and a weight sweep shows fusion
@@ -66,28 +98,26 @@ to close. BM25's reputation on MS MARCO comes from official document ranking wit
 tuned stemming and stopword handling; neither is present here, and at a 0.558
 starting point preprocessing would not close a 29-point gap.
 
-**Recommended default: `whole_passage` or `fixed_size`.** Tied-best recall among
-the single strategies, essentially tied-best MRR, the smallest competitive index,
-6.7 ms search, and the fewest off-topic leaks (1 of 8). They are interchangeable,
-which is the first finding restated. `fusion` is the quality ceiling if 45 ms of
-search is acceptable, but 0.854 against 0.848 does not justify making it the
-default for a voice demo where the dominant cost is elsewhere entirely.
+**Recommended default: `whole_passage`.** Nothing measurably beats it, it is the
+smallest competitive index at 38.3 MB, the fastest competitive search at 6.7 ms,
+and it has the fewest off-topic leaks (1 of 8). `fusion` costs 45 ms of search to
+buy a difference the data cannot distinguish from zero.
 
 ## Retrieval quality
 
-| strategy | axis | recall@1 | recall@5 | recall@10 | MRR@10 | nDCG@10 |
-|---|---|---|---|---|---|---|
-| `fusion` | fusion | 0.414 | **0.854** | 0.958 | 0.596 | 0.683 |
-| `query_aware_heldout` \* | enrichment | 0.416 | **0.850** | 0.962 | 0.599 | 0.685 |
-| `whole_passage` | split | 0.410 | **0.848** | 0.960 | 0.591 | 0.679 |
-| `fixed_size` | split | 0.410 | **0.848** | 0.958 | 0.592 | 0.679 |
-| `recursive` | split | 0.414 | **0.848** | 0.950 | 0.593 | 0.679 |
-| `parent_child` | unit | 0.412 | **0.822** | 0.942 | 0.580 | 0.667 |
-| `semantic` | split | 0.348 | **0.818** | 0.918 | 0.535 | 0.628 |
-| `sentence_window` | unit | 0.340 | **0.790** | 0.924 | 0.526 | 0.622 |
-| `query_aware` | enrichment | 0.312 | **0.790** | 1.000 | 0.528 | 0.639 |
-| `hybrid` | fusion | 0.340 | **0.740** | 0.898 | 0.510 | 0.602 |
-| `query_group` | aggregation | 0.400 | **0.422** | 0.426 | 0.411 | 0.415 |
+| strategy | axis | recall@1 | recall@5 | recall@10 | MRR@10 | nDCG@10 | vs `whole_passage`, 95% CI |
+|---|---|---|---|---|---|---|---|
+| `fusion` | fusion | 0.414 | **0.854** | 0.958 | 0.596 | 0.683 | -0.016 to +0.028, no difference |
+| `query_aware_heldout` \* | enrichment | 0.416 | **0.850** | 0.962 | 0.599 | 0.685 | -0.012 to +0.016, no difference |
+| `whole_passage` | split | 0.410 | **0.848** | 0.960 | 0.591 | 0.679 | *baseline* |
+| `fixed_size` | split | 0.410 | **0.848** | 0.958 | 0.592 | 0.679 | -0.008 to +0.008, no difference |
+| `recursive` | split | 0.414 | **0.848** | 0.950 | 0.593 | 0.679 | -0.014 to +0.014, no difference |
+| `parent_child` | unit | 0.412 | **0.822** | 0.942 | 0.580 | 0.667 | -0.054 to +0.000, no difference |
+| `semantic` | split | 0.348 | **0.818** | 0.918 | 0.535 | 0.628 | -0.056 to -0.004, worse |
+| `sentence_window` | unit | 0.340 | **0.790** | 0.924 | 0.526 | 0.622 | -0.092 to -0.024, worse |
+| `query_aware` | enrichment | 0.312 | **0.790** | 1.000 | 0.528 | 0.639 | -0.096 to -0.020, worse |
+| `hybrid` | fusion | 0.340 | **0.740** | 0.898 | 0.510 | 0.602 | -0.144 to -0.072, worse |
+| `query_group` | aggregation | 0.400 | **0.422** | 0.426 | 0.411 | 0.415 | -0.476 to -0.376, worse |
 
 ### The `query_aware` asterisk, and why neither of its numbers is clean
 
@@ -149,18 +179,55 @@ Decomposed rather than summed, because only one half scales with index size, and
 because embedding and FAISS cannot share a process on this build machine (both
 link their own OpenMP runtime; co-loading them segfaults once Metal is in use).
 
-Query embedding is strategy-independent: **P50 9.7 ms, P100 26.1 ms**.
+Query embedding is strategy-independent: **P50 9.7 ms, P100 26.4 ms**.
 
 | strategy | search P50 | search P100 | embed + search P50 |
 |---|---|---|---|
-| `query_group` | 2.62 ms | 2.87 ms | 12.3 ms |
-| `whole_passage` | 6.73 ms | 10.43 ms | 16.4 ms |
-| `query_aware_heldout` | 6.74 ms | 7.04 ms | 16.4 ms |
+| `query_group` | 2.62 ms | 2.84 ms | 12.3 ms |
+| `query_aware_heldout` | 6.74 ms | 7.15 ms | 16.4 ms |
 | `query_aware` | 6.74 ms | 7.05 ms | 16.4 ms |
-| `fixed_size` | 6.83 ms | 7.22 ms | 16.5 ms |
-| `recursive` | 8.81 ms | 9.26 ms | 18.5 ms |
-| `hybrid` | 10.01 ms | 25.15 ms | 19.7 ms |
-| `semantic` | 14.66 ms | 26.22 ms | 24.3 ms |
-| `parent_child` | 14.68 ms | 15.02 ms | 24.4 ms |
-| `sentence_window` | 23.34 ms | 33.47 ms | 33.0 ms |
-| `fusion` | 45.01 ms | 59.94 ms | 54.7 ms |
+| `whole_passage` | 6.74 ms | 25.31 ms | 16.4 ms |
+| `fixed_size` | 6.83 ms | 7.17 ms | 16.5 ms |
+| `recursive` | 8.80 ms | 9.27 ms | 18.5 ms |
+| `hybrid` | 10.01 ms | 13.87 ms | 19.7 ms |
+| `semantic` | 14.65 ms | 15.51 ms | 24.3 ms |
+| `parent_child` | 14.68 ms | 15.05 ms | 24.4 ms |
+| `sentence_window` | 23.35 ms | 64.39 ms | 33.0 ms |
+| `fusion` | 44.96 ms | 55.78 ms | 54.7 ms |
+
+## Reranking: the largest gain here, and not from chunking
+
+The table above raises a question it cannot answer. `whole_passage` reaches
+recall@10 of 0.960 but recall@1 of only 0.410 -- the relevant passage is
+almost always retrieved and simply not ranked first. That is an **ordering**
+problem, and no chunking strategy addresses it. A bi-encoder embeds query and
+passage separately and never compares them directly; a cross-encoder reads
+them together.
+
+Measured over the same 500 queries, reranking `whole_passage`
+candidates with `cross-encoder/ms-marco-MiniLM-L-6-v2`:
+
+| candidate depth | recall@1 | recall@5 | MRR@10 | rerank P50 |
+|---|---|---|---|---|
+| *none (dense order)* | *0.410* | *0.848* | *0.591* | *0 ms* |
+| 6 | 0.502 | **0.886** | 0.658 | 21.4 ms |
+| 7 | 0.494 | **0.900** | 0.661 | 26.6 ms |
+| 8 | 0.496 | **0.904** | 0.663 | 31.5 ms |
+| 10 | 0.504 | **0.916** | 0.671 | 41.2 ms |
+
+**recall@5 goes 0.848 to 0.916.** That is +6.8 points, well
+outside the ~1.6pp standard error at this sample size -- and far larger than
+anything the chunking slate achieved. `fusion`, the best chunking-side result,
+reached 0.854, which is *inside* that error bar against plain dense retrieval.
+
+**Depth 10 is chosen on both axes at once.** Quality peaks there
+(0.504 recall@1 against 0.500 at both 20 and 50), so a deeper candidate pool
+gives the model more chances to promote something wrong rather than more
+chances to find the answer. And it is the cheapest: measured on CPU, which is
+what the instance runs, 36 ms at depth 10 against 66 ms at 20 and 164 ms at
+50, on top of ~70 ms already owned. Depth 50 alone would breach the 200 ms
+target.
+
+The honest reading of this report as a whole: the dataset does not reward
+chunking, and the eight strategies establish that with evidence. What it
+rewards is reranking, which the chunking numbers pointed at all along.

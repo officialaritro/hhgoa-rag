@@ -25,6 +25,7 @@ from app.fusion import reciprocal_rank_fusion
 from app.indexing import load_index
 from app.lexical import BM25Index
 from app.passages import load_passage_store, resolve_text
+from app.reranking import RERANK_DEPTH, rerank_passages, reranking_enabled
 from app.schemas import RetrievalOutput, RetrievedPassage
 from app.strategies import chunk_paths, dense_names, get
 
@@ -64,6 +65,24 @@ def _load_passages():
     ~36 MB for 99,767 passages, against which a per-request load would be
     absurd."""
     return load_passage_store(PASSAGE_STORE_PATH)
+
+
+def _vector_is_reusable(row) -> bool:
+    """Whether this chunk's index vector is the vector of the text it returns.
+
+    True only when the embedded span and the returned span are the same text:
+    no widened return window (parent_child, sentence_window), no query prefix
+    baked into the embedding (query_aware), and no stored text that is not a
+    substring of any parent (query_group). For those, the index holds a vector
+    of something other than what the user is shown, and scoring the answer
+    against it would be measuring the wrong thing.
+    """
+    if row.get("text") is not None or row.get("embed_query"):
+        return False
+    return (
+        row.get("ret_start", row["start"]) == row["start"]
+        and row.get("ret_end", row["end"]) == row["end"]
+    )
 
 
 def _dense_parent_ranking(
@@ -139,7 +158,7 @@ def retrieve(query: str, strategy: str, k: int = 5) -> RetrievalOutput:
     passages = _load_passages()
 
     query_vector = np.array([embed(query)], dtype="float32")
-    scores, indices = index.search(query_vector, k * OVERFETCH)
+    scores, indices = index.search(query_vector, max(k, RERANK_DEPTH) * OVERFETCH)
 
     seen_parents: set[int] = set()
     found: list[RetrievedPassage] = []
@@ -160,15 +179,36 @@ def retrieve(query: str, strategy: str, k: int = 5) -> RetrievalOutput:
         # no single parent is its source; reporting a nominal parent would
         # understate it against the corpus relevance labels.
         source = text if row.get("text") is not None else passages[parent_id]["text"]
+
+        # Hand the groundedness guard the vector we already have, so it embeds
+        # only the answer's sentences. That guard measured 170ms on the instance
+        # and took boundary A to 210ms, past its 200ms target; re-embedding five
+        # passages that FAISS just matched is the avoidable part of it.
+        vector = None
+        if _vector_is_reusable(row):
+            try:
+                vector = [float(x) for x in index.reconstruct(int(row_id))]
+            except Exception:  # noqa: BLE001 -- not every index type reconstructs
+                vector = None
+
         found.append(
             RetrievedPassage(
                 text=text,
                 source_passage=source,
                 is_selected=bool(passages[parent_id]["is_selected"]),
                 score=float(score),
+                vector=vector,
             )
         )
-        if len(found) >= k:
+        # Collect a deeper pool than the caller asked for: the reranker's gain
+        # comes from reordering candidates that dense order put below k, so
+        # truncating here first would discard exactly what it promotes.
+        if len(found) >= max(k, RERANK_DEPTH):
             break
+
+    if reranking_enabled():
+        found = rerank_passages(query, found, top_k=k)
+    else:
+        found = found[:k]
 
     return RetrievalOutput(query=query, strategy=strategy, passages=found)

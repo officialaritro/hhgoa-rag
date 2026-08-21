@@ -79,16 +79,47 @@ def sentence_support(answer: str, retrieval: RetrievalOutput) -> list[float]:
     sentences = split_sentences(answer)
     if not sentences:
         return []
-    passages = [p.text for p in retrieval.passages]
-    if not passages:
+    if not retrieval.passages:
         # Nothing to be grounded in. A refusal, not a crash.
         return [0.0] * len(sentences)
 
-    # One batched call for both sides. Two calls pay the model's per-call
-    # overhead twice for ~13 short texts, and the split gains nothing.
-    vectors = np.asarray(embed_batch(sentences + passages), dtype="float32")
-    sentence_vectors = vectors[: len(sentences)]
-    passage_vectors = vectors[len(sentences) :]
+    # Reuse any vector retrieval already computed. For a chunk whose embedded
+    # span is its returned span, the FAISS index holds exactly the vector of the
+    # text being returned, so re-embedding it is pure waste -- and this guard was
+    # the largest cost the pipeline owns.
+    supplied: dict[int, list[float]] = {}
+    to_embed: list[str] = []
+    for position, passage in enumerate(retrieval.passages):
+        if passage.vector:
+            supplied[position] = passage.vector
+        else:
+            to_embed.append(passage.text)
+
+    embedded = np.asarray(embed_batch(sentences + to_embed), dtype="float32")
+    sentence_vectors = embedded[: len(sentences)]
+    fresh = list(embedded[len(sentences) :])
+
+    # A vector of the wrong width means a stale artifact -- a different embedding
+    # model, most likely -- and trusting it would corrupt every decision
+    # silently. Embed that passage instead.
+    width = sentence_vectors.shape[1]
+    mismatched = [i for i, v in supplied.items() if len(v) != width]
+    if mismatched:
+        extra = np.asarray(
+            embed_batch([retrieval.passages[i].text for i in mismatched]),
+            dtype="float32",
+        )
+        for i, vector in zip(mismatched, extra):
+            supplied[i] = list(vector)
+
+    rows_out: list[np.ndarray] = []
+    fresh_iter = iter(fresh)
+    for position in range(len(retrieval.passages)):
+        if position in supplied:
+            rows_out.append(np.asarray(supplied[position], dtype="float32"))
+        else:
+            rows_out.append(next(fresh_iter))
+    passage_vectors = np.vstack(rows_out)
 
     # Both sides are L2-normalised by embed_batch, so the dot product is cosine.
     # Max over passages: a claim backed by one passage is grounded even when the
@@ -117,3 +148,24 @@ def sentence_support(answer: str, retrieval: RetrievalOutput) -> list[float]:
 # earlier in the pipeline; a bare INSUFFICIENT_CONTEXT scores near zero against
 # any context and would drag the grounded distribution down artificially.
 MEASURED_THRESHOLD = 0.40
+
+# CORRECTION, measured 2026-08-21. An earlier commit message claimed this guard
+# took 110.7ms to 53.3ms, "a 2.1x reduction". That compared the old guard on the
+# EC2 instance against this one on an M1 with MPS -- different hardware, so not a
+# comparison at all.
+#
+# On matched hardware over 25 real answers, this guard is SLOWER:
+#
+#   old (2 single embeds, context concatenated)  P50 31.2 ms
+#   new (1 batched call, passages separate)      P50 38.9 ms   1.25x slower
+#
+# Which is the expected direction once stated plainly: the old guard truncated
+# at 256 tokens and so fed the model less work. Processing the whole context
+# costs more than processing three quarters of it.
+#
+# So this change buys correctness, not speed, and the claim that it "funds the
+# reranker" was wrong. What it buys is real and measured -- clean separation
+# where the distributions previously overlapped, 100% of ungrounded answers
+# caught at zero false refusals, and fabricated figures detected at all -- but
+# the latency budget has to absorb it rather than being helped by it.
+GUARD_LATENCY_IS_A_COST_NOT_A_SAVING = True

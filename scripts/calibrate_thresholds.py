@@ -32,23 +32,24 @@ import subprocess
 import sys
 from pathlib import Path
 
+from app.offtopic_probes import all_probes
 from app.strategies import chunk_paths, dense_names
 
 CORPUS_PATH = "data/corpus.jsonl"
 QUERY_VECTORS = "data/calibration_queries.f32"
 
-# Deliberately far from a corpus of MS MARCO web-search results. Kept identical
-# to scripts/tune_thresholds.py so the two measurements stay comparable.
-OFF_TOPIC_QUERIES = [
-    "what is my bank account password",
-    "sing me a lullaby in Portuguese",
-    "ਮੈਨੂੰ ਪੰਜਾਬੀ ਵਿੱਚ ਇੱਕ ਕਹਾਣੀ ਸੁਣਾਓ",
-    "what am I thinking about right now",
-    "book me a flight to Reykjavik tomorrow morning",
-    "qwertyuiop asdfghjkl zxcvbnm",
-    "who won the 2047 world cup final",
-    "please delete all my files",
-]
+# The probe set moved to app/offtopic_probes.py and grew from 8 to 50 across 8
+# categories (private data, commands, creative, other languages, gibberish,
+# unknowable, meta, computation). Eight probes was enough to sanity-check a
+# threshold and far too few to ground one: it could not show which KINDS of
+# off-topic input leak, and every recorded leak count was out of eight.
+#
+# A multi-feature classifier over the score profile was fitted against this set
+# and REJECTED -- see scripts/train_offtopic.py. At matched false-refusal rates
+# it does not beat this threshold (at 5%: 32/50 against 33/50; at 8%: 39/50
+# against 44/50). The signal really is mostly in top-1, and the extra features
+# are largely collinear with it.
+OFF_TOPIC_QUERIES = all_probes()
 
 # The p05 of the in-corpus distribution. Set here rather than inline so the
 # choice is visible: a lower percentile refuses fewer real questions and leaks

@@ -178,3 +178,62 @@ def test_embeds_everything_in_a_single_batched_call(mock_embed):
     sentence_support("One. Two. Three.", _retrieval("a", "b", "c", "d", "e"))
 
     assert mock_embed.call_count == 1
+
+
+# ------------------------------------------- reusing vectors already in FAISS
+
+
+@patch("app.groundedness.embed_batch")
+def test_reuses_a_supplied_passage_vector_instead_of_embedding_it(mock_embed):
+    """The guard is the largest cost the pipeline owns -- measured 170ms on the
+    instance, which pushed boundary A to 210ms and past the 200ms target.
+
+    For a chunk whose embedded span IS its returned span, that vector is already
+    in the FAISS index, so retrieval can hand it over and the guard embeds only
+    the answer's sentences. Nothing is recomputed that was just computed.
+    """
+    mock_embed.side_effect = lambda texts, **kw: np.array(
+        [[1.0, 0.0]] * len(texts), dtype="float32"
+    )
+    retrieval = _retrieval("some passage text")
+    retrieval.passages[0].vector = [1.0, 0.0]
+
+    support = sentence_support("A claim.", retrieval)
+
+    assert support == pytest.approx([1.0])
+    embedded = [t for call in mock_embed.call_args_list for t in call.args[0]]
+    assert embedded == ["A claim."], f"passage was re-embedded: {embedded}"
+
+
+@patch("app.groundedness.embed_batch")
+def test_embeds_only_the_passages_without_a_supplied_vector(mock_embed):
+    """Mixed case. sentence_window returns a window wider than what it embedded,
+    so its index vector is the wrong text and it must fall back."""
+    mock_embed.side_effect = lambda texts, **kw: np.array(
+        [[1.0, 0.0]] * len(texts), dtype="float32"
+    )
+    retrieval = _retrieval("reusable", "must embed")
+    retrieval.passages[0].vector = [1.0, 0.0]
+
+    sentence_support("A claim.", retrieval)
+
+    embedded = [t for call in mock_embed.call_args_list for t in call.args[0]]
+    assert "must embed" in embedded
+    assert "reusable" not in embedded
+
+
+@patch("app.groundedness.embed_batch")
+def test_a_supplied_vector_of_the_wrong_width_is_ignored_not_trusted(mock_embed):
+    """Defensive: a stale vector from a different embedding model would silently
+    corrupt every groundedness decision rather than failing."""
+    mock_embed.side_effect = lambda texts, **kw: np.array(
+        [[1.0, 0.0]] * len(texts), dtype="float32"
+    )
+    retrieval = _retrieval("passage")
+    retrieval.passages[0].vector = [1.0, 0.0, 0.0, 0.0]
+
+    support = sentence_support("A claim.", retrieval)
+
+    assert len(support) == 1
+    embedded = [t for call in mock_embed.call_args_list for t in call.args[0]]
+    assert "passage" in embedded, "a mismatched vector was used instead of embedding"
