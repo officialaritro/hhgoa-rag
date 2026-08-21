@@ -131,6 +131,6 @@ def test_the_prompt_still_asks_for_the_decline_sentinel():
     """The sentinel is what lets a decline be detected structurally; the
     groundedness guard cannot catch one, since a spoken decline quotes the
     passages and scores as grounded."""
-    from app.generation import INSUFFICIENT_CONTEXT, _SYSTEM_PROMPT
+    from app.generation import _SYSTEM_PROMPT, INSUFFICIENT_CONTEXT
 
     assert INSUFFICIENT_CONTEXT in _SYSTEM_PROMPT
