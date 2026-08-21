@@ -117,3 +117,24 @@ def sentence_support(answer: str, retrieval: RetrievalOutput) -> list[float]:
 # earlier in the pipeline; a bare INSUFFICIENT_CONTEXT scores near zero against
 # any context and would drag the grounded distribution down artificially.
 MEASURED_THRESHOLD = 0.40
+
+# CORRECTION, measured 2026-08-21. An earlier commit message claimed this guard
+# took 110.7ms to 53.3ms, "a 2.1x reduction". That compared the old guard on the
+# EC2 instance against this one on an M1 with MPS -- different hardware, so not a
+# comparison at all.
+#
+# On matched hardware over 25 real answers, this guard is SLOWER:
+#
+#   old (2 single embeds, context concatenated)  P50 31.2 ms
+#   new (1 batched call, passages separate)      P50 38.9 ms   1.25x slower
+#
+# Which is the expected direction once stated plainly: the old guard truncated
+# at 256 tokens and so fed the model less work. Processing the whole context
+# costs more than processing three quarters of it.
+#
+# So this change buys correctness, not speed, and the claim that it "funds the
+# reranker" was wrong. What it buys is real and measured -- clean separation
+# where the distributions previously overlapped, 100% of ungrounded answers
+# caught at zero false refusals, and fabricated figures detected at all -- but
+# the latency budget has to absorb it rather than being helped by it.
+GUARD_LATENCY_IS_A_COST_NOT_A_SAVING = True
