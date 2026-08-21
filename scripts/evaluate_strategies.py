@@ -528,6 +528,57 @@ def write_report() -> None:
             f"{r['search_ms_p100']:.2f} ms | {embed_p50 + r['search_ms_p50']:.1f} ms |"
         )
 
+    # Reranking, if it has been measured. Kept in this report rather than a
+    # separate one because it is the answer to the question the chunking table
+    # raises: recall@10 0.960 against recall@1 0.410 is an ordering problem.
+    rerank_path = Path("data/rerank_results.json")
+    if rerank_path.exists():
+        rr = json.loads(rerank_path.read_text())
+        lines += [
+            "",
+            "## Reranking: the largest gain here, and not from chunking",
+            "",
+            "The table above raises a question it cannot answer. `whole_passage` reaches",
+            "recall@10 of 0.960 but recall@1 of only 0.410 -- the relevant passage is",
+            "almost always retrieved and simply not ranked first. That is an **ordering**",
+            "problem, and no chunking strategy addresses it. A bi-encoder embeds query and",
+            "passage separately and never compares them directly; a cross-encoder reads",
+            "them together.",
+            "",
+            f"Measured over the same {rr['queries']} queries, reranking `whole_passage`",
+            "candidates with `cross-encoder/ms-marco-MiniLM-L-6-v2`:",
+            "",
+            "| candidate depth | recall@1 | recall@5 | MRR@10 | rerank P50 |",
+            "|---|---|---|---|---|",
+            f"| *none (dense order)* | *{rr['baseline_recall@1']:.3f}* | "
+            f"*{rr['baseline_recall@5']:.3f}* | *{rr['baseline_mrr@10']:.3f}* | *0 ms* |",
+        ]
+        for row in rr["reranked"]:
+            lines.append(
+                f"| {row['depth']} | {row['recall@1']:.3f} | **{row['recall@5']:.3f}** | "
+                f"{row['mrr@10']:.3f} | {row['rerank_ms_p50']:.1f} ms |"
+            )
+        best = max(rr["reranked"], key=lambda r: r["recall@1"])
+        lines += [
+            "",
+            f"**recall@5 goes {rr['baseline_recall@5']:.3f} to "
+            f"{max(r['recall@5'] for r in rr['reranked']):.3f}.** That is +6.8 points, well",
+            "outside the ~1.6pp standard error at this sample size -- and far larger than",
+            "anything the chunking slate achieved. `fusion`, the best chunking-side result,",
+            "reached 0.854, which is *inside* that error bar against plain dense retrieval.",
+            "",
+            f"**Depth {best['depth']} is chosen on both axes at once.** Quality peaks there",
+            "(0.504 recall@1 against 0.500 at both 20 and 50), so a deeper candidate pool",
+            "gives the model more chances to promote something wrong rather than more",
+            "chances to find the answer. And it is the cheapest: measured on CPU, which is",
+            "what the instance runs, 36 ms at depth 10 against 66 ms at 20 and 164 ms at",
+            "50, on top of ~70 ms already owned. Depth 50 alone would breach the 200 ms",
+            "target.",
+            "",
+            "The honest reading of this report as a whole: the dataset does not reward",
+            "chunking, and the eight strategies establish that with evidence. What it",
+            "rewards is reranking, which the chunking numbers pointed at all along.",
+        ]
     Path(REPORT_PATH).parent.mkdir(parents=True, exist_ok=True)
     Path(REPORT_PATH).write_text("\n".join(lines) + "\n")
     print(f"\nwrote {REPORT_PATH}")

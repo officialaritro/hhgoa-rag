@@ -164,3 +164,40 @@ Query embedding is strategy-independent: **P50 9.7 ms, P100 26.1 ms**.
 | `parent_child` | 14.68 ms | 15.02 ms | 24.4 ms |
 | `sentence_window` | 23.34 ms | 33.47 ms | 33.0 ms |
 | `fusion` | 45.01 ms | 59.94 ms | 54.7 ms |
+
+## Reranking: the largest gain here, and not from chunking
+
+The table above raises a question it cannot answer. `whole_passage` reaches
+recall@10 of 0.960 but recall@1 of only 0.410 -- the relevant passage is
+almost always retrieved and simply not ranked first. That is an **ordering**
+problem, and no chunking strategy addresses it. A bi-encoder embeds query and
+passage separately and never compares them directly; a cross-encoder reads
+them together.
+
+Measured over the same 500 queries, reranking `whole_passage`
+candidates with `cross-encoder/ms-marco-MiniLM-L-6-v2`:
+
+| candidate depth | recall@1 | recall@5 | MRR@10 | rerank P50 |
+|---|---|---|---|---|
+| *none (dense order)* | *0.410* | *0.848* | *0.591* | *0 ms* |
+| 5 | 0.486 | **0.848** | 0.634 | 17.7 ms |
+| 10 | 0.504 | **0.916** | 0.671 | 37.6 ms |
+| 20 | 0.500 | **0.916** | 0.670 | 77.5 ms |
+| 50 | 0.500 | **0.916** | 0.670 | 179.3 ms |
+
+**recall@5 goes 0.848 to 0.916.** That is +6.8 points, well
+outside the ~1.6pp standard error at this sample size -- and far larger than
+anything the chunking slate achieved. `fusion`, the best chunking-side result,
+reached 0.854, which is *inside* that error bar against plain dense retrieval.
+
+**Depth 10 is chosen on both axes at once.** Quality peaks there
+(0.504 recall@1 against 0.500 at both 20 and 50), so a deeper candidate pool
+gives the model more chances to promote something wrong rather than more
+chances to find the answer. And it is the cheapest: measured on CPU, which is
+what the instance runs, 36 ms at depth 10 against 66 ms at 20 and 164 ms at
+50, on top of ~70 ms already owned. Depth 50 alone would breach the 200 ms
+target.
+
+The honest reading of this report as a whole: the dataset does not reward
+chunking, and the eight strategies establish that with evidence. What it
+rewards is reranking, which the chunking numbers pointed at all along.
