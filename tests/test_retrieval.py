@@ -539,3 +539,113 @@ def test_a_reconstruct_failure_degrades_to_no_vector(mock_store, mock_load, mock
 
     assert result.passages[0].vector is None
     assert result.passages[0].text
+
+
+# ------------------------------------------------- reporting the rerank cost
+
+
+@patch("app.retrieval.embed", return_value=np.zeros(3))
+@patch("app.retrieval.load_index")
+@patch("app.retrieval.load_passage_store", return_value=PASSAGES)
+@patch("app.retrieval.rerank_passages")
+def test_rerank_reports_its_own_cost_separately(
+    mock_rerank, mock_store, mock_load, mock_embed
+):
+    """Reranking is ~53ms of a 73ms retrieval stage on the instance. Folding it
+    into one number hides the largest quality change in the project from the
+    latency chart, so it is timed and reported on its own."""
+    rows = [
+        {"parent_id": 0, "start": 0, "end": 15},
+        {"parent_id": 1, "start": 0, "end": 36},
+    ]
+    mock_load.return_value = (_index_returning([0, 1]), rows)
+    mock_rerank.side_effect = lambda q, ps, top_k: ps[:top_k]
+
+    result = retrieve(query="q", strategy="whole_passage", k=1)
+
+    assert result.rerank_ms is not None
+    assert result.rerank_ms >= 0.0
+
+
+@patch("app.retrieval.embed", return_value=np.zeros(3))
+@patch("app.retrieval.load_index")
+@patch("app.retrieval.load_passage_store", return_value=PASSAGES)
+@patch("app.retrieval.reranking_enabled", return_value=False)
+def test_rerank_cost_is_none_when_reranking_is_off(
+    mock_enabled, mock_store, mock_load, mock_embed
+):
+    """None, not zero: the UI should omit the bar entirely rather than draw a
+    zero-width one implying the stage ran."""
+    rows = [{"parent_id": 0, "start": 0, "end": 15}]
+    mock_load.return_value = (_index_returning([0]), rows)
+
+    result = retrieve(query="q", strategy="whole_passage", k=1)
+
+    assert result.rerank_ms is None
+
+
+# ------------------------------- the score the off-topic guard is calibrated on
+
+
+@patch("app.retrieval.embed", return_value=np.zeros(3))
+@patch("app.retrieval.load_index")
+@patch("app.retrieval.load_passage_store", return_value=PASSAGES)
+@patch("app.retrieval.rerank_passages")
+def test_reports_the_best_dense_score_before_reranking_truncates(
+    mock_rerank, mock_store, mock_load, mock_embed
+):
+    """The off-topic threshold is calibrated on the best dense score over the
+    whole index. Serving must hand the guard the same quantity.
+
+    Reranking reorders a pool of RERANK_DEPTH candidates and returns k of them,
+    so if it demotes the highest-cosine passage out of the returned k, a max over
+    what was returned is LOWER than what the threshold was measured against --
+    and real questions get refused. Measured live: `recursive` refused "what is
+    the capital of France?" at 0.564 against a 0.564 threshold while three other
+    strategies answered it.
+    """
+    rows = [
+        {"parent_id": 0, "start": 0, "end": 15},
+        {"parent_id": 1, "start": 0, "end": 36},
+    ]
+    # dense finds 0.90 then 0.40; the reranker keeps only the 0.40 one
+    mock_load.return_value = (_index_returning([0, 1], [0.90, 0.40]), rows)
+    mock_rerank.side_effect = lambda q, ps, top_k: [ps[-1]][:top_k]
+
+    result = retrieve(query="q", strategy="whole_passage", k=1)
+
+    assert result.passages[0].score == pytest.approx(0.40)
+    assert result.top_dense_score == pytest.approx(0.90), (
+        "the guard would see 0.40 and refuse a question the index answered at 0.90"
+    )
+
+
+@patch("app.retrieval.embed", return_value=np.zeros(3))
+@patch("app.retrieval.load_index")
+@patch("app.retrieval.load_passage_store", return_value=PASSAGES)
+@patch("app.retrieval.reranking_enabled", return_value=False)
+def test_best_dense_score_is_reported_without_reranking_too(
+    mock_enabled, mock_store, mock_load, mock_embed
+):
+    rows = [{"parent_id": 0, "start": 0, "end": 15}]
+    mock_load.return_value = (_index_returning([0], [0.77]), rows)
+
+    result = retrieve(query="q", strategy="whole_passage", k=1)
+
+    assert result.top_dense_score == pytest.approx(0.77)
+
+
+@patch("app.retrieval.embed", return_value=np.zeros(3))
+@patch("app.retrieval.load_index")
+@patch("app.retrieval.load_passage_store", return_value=PASSAGES)
+def test_composed_strategies_also_report_a_best_dense_score(
+    mock_store, mock_load, mock_embed
+):
+    """hybrid and fusion inherit a member's threshold, so they need the same
+    quantity or the inherited number is applied to a different distribution."""
+    rows = [{"parent_id": 0, "start": 0, "end": 15}]
+    mock_load.return_value = (_index_returning([0], [0.81]), rows)
+
+    result = retrieve(query="q", strategy="fusion", k=1)
+
+    assert result.top_dense_score == pytest.approx(0.81)

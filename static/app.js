@@ -196,10 +196,59 @@ const STAGE_LABELS = {
   stt: "Speech-to-text",
   guardrail_unsafe: "Guardrail · unsafe input",
   retrieval: "Retrieval (embed + FAISS)",
+  rerank: "Rerank (cross-encoder)",
   guardrail_off_topic: "Guardrail · off-topic",
   generation: "Generation (Claude)",
   guardrail_groundedness: "Guardrail · groundedness",
 };
+
+
+// Which check refused, keyed on the server's `refused_by`. The task asks the
+// system to show that it knows when NOT to answer, so a refusal is a result
+// worth presenting properly rather than an error string.
+const GUARD_LABELS = {
+  off_topic: "Off-topic guard",
+  groundedness: "Groundedness guard",
+  insufficient_context: "Not in the retrieved passages",
+  unsafe_input: "Unsafe-input guard",
+  stt: "Speech-to-text",
+  generation: "Generation",
+  internal_error: "Internal error",
+};
+
+function scoreNote(data) {
+  // A similarity means nothing without the bar it had to clear, so both are
+  // shown -- on success as well as refusal. This is what makes the per-index
+  // calibration visible instead of a claim in a document.
+  if (data.top_score == null) return "";
+  if (data.offtopic_threshold == null) return `top match ${data.top_score.toFixed(3)}`;
+
+  // Enough decimals to actually separate the two. At three, a score of 0.5637
+  // against a threshold of 0.5641 rendered as "top match 0.564 · below
+  // threshold 0.564" -- two identical numbers and a verdict that reads as a
+  // bug. Widen only when rounding collapses them, so the common case stays
+  // readable.
+  let digits = 3;
+  while (
+    digits < 6 &&
+    data.top_score.toFixed(digits) === data.offtopic_threshold.toFixed(digits)
+  ) {
+    digits += 1;
+  }
+  const score = data.top_score.toFixed(digits);
+  const bar = data.offtopic_threshold.toFixed(digits);
+  const verb = data.top_score >= data.offtopic_threshold ? "cleared" : "below";
+  return `top match ${score} · ${verb} threshold ${bar}`;
+}
+
+function refusalHtml(data) {
+  const guard = GUARD_LABELS[data.refused_by] || "Refused";
+  const detail = data.refusal_reason || "";
+  const note = scoreNote(data);
+  return `<span class="refusal-guard">${guard}</span>
+     <span class="refusal-detail">${detail}</span>
+     ${note ? `<span class="refusal-score">${note}</span>` : ""}`;
+}
 
 function buildLatencyChartHtml(stagesMs, totalMs) {
   const entries = Object.entries(stagesMs || {});
@@ -273,10 +322,12 @@ function displayResult(data) {
     answerEl.innerHTML = parseMarkdown(data.answer);
     answerEl.className = "";
   } else {
-    const score = data.top_score != null ? ` (top match ${data.top_score.toFixed(3)})` : "";
-    answerEl.textContent = data.refusal_reason ? `Cannot answer — ${data.refusal_reason}${score}` : "";
-    answerEl.className = "refusal";
+    answerEl.innerHTML = data.refusal_reason ? refusalHtml(data) : "";
+    answerEl.className = "refusal refusal-block";
   }
+  const note = data.answer ? scoreNote(data) : "";
+  $("answerScore").textContent = note;
+  $("answerScore").style.display = note ? "block" : "none";
   renderLatency(data);
   renderCitations(data.passages, $("citations"));
   $("outputContainer").style.display = "grid";
@@ -295,17 +346,42 @@ function displayCompareResult(data) {
   } else {
     refusalEl.style.display = "none";
     grid.style.display = "";
-    for (const strategy of ["fixed_size", "semantic"]) {
+
+    // Build a column per strategy the server actually compared. This used to
+    // loop over a hardcoded ["fixed_size", "semantic"], which threw the moment
+    // the compared set changed -- data.results[strategy] came back undefined.
+    const compared = Object.keys(data.results);
+    grid.innerHTML = compared
+      .map((s) => {
+        const axis = (strategyDetails[s] || {}).axis;
+        const badge = axis ? `<span class="axis-badge">${axis}</span>` : "";
+        return `<div class="card compare-column" id="compareCol_${s}">
+             <h3>${prettyStrategy(s)}${badge}</h3>
+             <div class="answer" aria-live="polite"></div>
+             <div class="latency"></div>
+             <div class="citations"></div>
+           </div>`;
+      })
+      .join("");
+
+    for (const strategy of compared) {
       const result = data.results[strategy];
       const col = $(`compareCol_${strategy}`);
+      if (!result || !col) continue;
       const answerEl = col.querySelector(".answer");
       if (result.answer) {
         answerEl.innerHTML = parseMarkdown(result.answer);
         answerEl.className = "answer";
+        const colNote = scoreNote(result);
+        if (colNote) {
+          answerEl.insertAdjacentHTML(
+            "afterend",
+            `<div class="refusal-score">${colNote}</div>`
+          );
+        }
       } else {
-        const score = result.top_score != null ? ` (top match ${result.top_score.toFixed(3)})` : "";
-        answerEl.textContent = `Cannot answer — ${result.refusal_reason}${score}`;
-        answerEl.className = "answer refusal";
+        answerEl.innerHTML = refusalHtml(result);
+        answerEl.className = "answer refusal refusal-block";
       }
       const totalMs = Object.values(result.stages_ms || {}).reduce((a, b) => a + b, 0);
       col.querySelector(".latency").innerHTML = buildLatencyChartHtml(result.stages_ms, totalMs);
@@ -390,16 +466,50 @@ async function stopRecording() {
   }
 }
 
+// Populated from /api/strategies so the UI never restates what the registry
+// already knows. Ten strategy names mean nothing on their own; the server
+// ships a description and an axis for each.
+let strategyDetails = {};
+
+function prettyStrategy(name) {
+  // replaceAll, not replace: `replace` with a string pattern substitutes only
+  // the first match, so `query_aware_heldout` came out as `query-aware_heldout`.
+  return name.replaceAll("_", "-");
+}
+
 async function loadStrategies() {
   try {
-    const { strategies, default: def } = await (await fetch("/api/strategies")).json();
+    const { strategies, default: def, details } = await (
+      await fetch("/api/strategies")
+    ).json();
     selectedStrategy = def;
-    $("strategyChoices").innerHTML = strategies
-      .map(
-        (s) =>
-          `<input type="radio" id="strat_${s}" name="strategy" value="${s}" ${s === def ? "checked" : ""}>
-           <label for="strat_${s}">${s.replace("_", "-")}</label>`
-      )
+    strategyDetails = details || {};
+    // Grouped by axis, not a flat list. The axes -- what is split, what unit is
+    // returned, what the embedding is enriched with, what is aggregated -- are
+    // the actual argument for a "vast" chunking strategy; ten undifferentiated
+    // pills hide it.
+    const byAxis = new Map();
+    for (const s of strategies) {
+      const axis = (strategyDetails[s] || {}).axis || "other";
+      if (!byAxis.has(axis)) byAxis.set(axis, []);
+      byAxis.get(axis).push(s);
+    }
+    $("strategyChoices").innerHTML = [...byAxis.entries()]
+      .map(([axis, members]) => {
+        const pills = members
+          .map((s) => {
+            const detail = strategyDetails[s] || {};
+            // The description is the registry's own, surfaced as a tooltip
+            // rather than duplicated here.
+            const tip = detail.description
+              ? ` title="${detail.description.replace(/"/g, "&quot;")}"`
+              : "";
+            return `<input type="radio" id="strat_${s}" name="strategy" value="${s}" ${s === def ? "checked" : ""}>
+               <label for="strat_${s}"${tip}>${prettyStrategy(s)}</label>`;
+          })
+          .join("");
+        return `<div class="strategy-axis"><span class="strategy-axis-name">${axis}</span>${pills}</div>`;
+      })
       .join("");
     for (const input of document.querySelectorAll('input[name="strategy"]')) {
       input.addEventListener("change", (e) => {

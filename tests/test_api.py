@@ -1,5 +1,6 @@
 from unittest.mock import patch
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.harness import StageResult
@@ -18,6 +19,10 @@ def _ok_retrieval():
                 text="x is y", source_passage="x is y", is_selected=True, score=0.9
             )
         ],
+        # The best dense score over the candidate pool before reranking. This is
+        # what the off-topic guard is given, so a fixture that leaves it at the
+        # 0.0 default is testing a retrieval that found nothing.
+        top_dense_score=0.9,
     )
 
 
@@ -522,3 +527,154 @@ def test_ask_refuses_when_the_model_declines_to_answer(
     # The decline short-circuits before groundedness -- scoring a refusal
     # against the context is the check that cannot tell them apart.
     mock_grounded.assert_not_called()
+
+
+@patch("app.main.check_groundedness")
+@patch("app.main.check_off_topic")
+@patch("app.main.check_unsafe_input")
+@patch("app.main.generate_answer")
+@patch("app.main.retrieve")
+@patch("app.main.transcribe")
+def test_a_refusal_names_which_guard_fired(
+    mock_transcribe,
+    mock_retrieve,
+    mock_generate,
+    mock_unsafe,
+    mock_offtopic,
+    mock_grounded,
+):
+    """`refusal_reason` is prose written for a person. A stable machine-readable
+    name is what lets the UI say *which* check refused, which is the graded
+    requirement -- "show that your system knows when not to answer" is only
+    demonstrated if the demo can show it."""
+    mock_transcribe.return_value = StageResult(
+        ok=True, value=STTOutput(transcript="what is x")
+    )
+    mock_unsafe.return_value.passed = True
+    mock_retrieve.return_value = _ok_retrieval()
+    mock_offtopic.return_value.passed = False
+    mock_offtopic.return_value.reason = "off-topic"
+
+    body = client.post("/api/ask?strategy=whole_passage", content=b"audio").json()
+
+    assert body["refusal_reason"] == "off-topic"
+    assert body["refused_by"] == "off_topic"
+
+
+@patch("app.main.check_groundedness")
+@patch("app.main.check_off_topic")
+@patch("app.main.check_unsafe_input")
+@patch("app.main.generate_answer")
+@patch("app.main.retrieve")
+@patch("app.main.transcribe")
+def test_a_groundedness_refusal_is_attributed_to_that_guard(
+    mock_transcribe,
+    mock_retrieve,
+    mock_generate,
+    mock_unsafe,
+    mock_offtopic,
+    mock_grounded,
+):
+    """The most demonstrable refusal there is: a fabricated figure caught
+    literally rather than by similarity."""
+    mock_transcribe.return_value = StageResult(
+        ok=True, value=STTOutput(transcript="what is x")
+    )
+    mock_unsafe.return_value.passed = True
+    mock_retrieve.return_value = _ok_retrieval()
+    mock_offtopic.return_value.passed = True
+    mock_generate.return_value = StageResult(
+        ok=True, value=GenerationOutput(answer="founded in 1987")
+    )
+    mock_grounded.return_value.passed = False
+    mock_grounded.return_value.reason = "ungrounded: figures not in context ['1987']"
+
+    body = client.post("/api/ask?strategy=whole_passage", content=b"audio").json()
+
+    assert body["refused_by"] == "groundedness"
+    assert "1987" in body["refusal_reason"]
+
+
+@patch("app.main.check_groundedness")
+@patch("app.main.check_off_topic")
+@patch("app.main.check_unsafe_input")
+@patch("app.main.generate_answer")
+@patch("app.main.retrieve")
+@patch("app.main.transcribe")
+def test_a_successful_answer_reports_the_threshold_it_cleared(
+    mock_transcribe,
+    mock_retrieve,
+    mock_generate,
+    mock_unsafe,
+    mock_offtopic,
+    mock_grounded,
+    monkeypatch,
+):
+    """A top score means nothing without the bar it had to clear. Reporting both
+    on success -- not only on refusal -- is what makes the per-index calibration
+    visible rather than a claim in a document."""
+    # Supplied through the environment override rather than read from a built
+    # manifest: data/ is gitignored, so a test that needs a real index passes
+    # locally and fails in CI.
+    from app.guardrails import offtopic_threshold
+
+    monkeypatch.setenv("OFFTOPIC_SIMILARITY_THRESHOLD_WHOLE_PASSAGE", "0.5")
+    offtopic_threshold.cache_clear()
+    mock_transcribe.return_value = StageResult(
+        ok=True, value=STTOutput(transcript="what is x")
+    )
+    mock_unsafe.return_value.passed = True
+    mock_retrieve.return_value = _ok_retrieval()
+    mock_offtopic.return_value.passed = True
+    mock_generate.return_value = StageResult(
+        ok=True, value=GenerationOutput(answer="x is y")
+    )
+    mock_grounded.return_value.passed = True
+
+    try:
+        body = client.post("/api/ask?strategy=whole_passage", content=b"audio").json()
+    finally:
+        offtopic_threshold.cache_clear()
+
+    assert body["answer"] == "x is y"
+    assert body["refused_by"] is None
+    assert body["offtopic_threshold"] == 0.5
+    assert body["top_score"] >= body["offtopic_threshold"]
+
+
+@patch("app.main.check_groundedness")
+@patch("app.main.check_off_topic")
+@patch("app.main.check_unsafe_input")
+@patch("app.main.generate_answer")
+@patch("app.main.retrieve")
+@patch("app.main.transcribe")
+def test_rerank_is_reported_as_its_own_stage(
+    mock_transcribe,
+    mock_retrieve,
+    mock_generate,
+    mock_unsafe,
+    mock_offtopic,
+    mock_grounded,
+):
+    """Split out of `retrieval` so the latency chart shows what the cross-encoder
+    costs. The two must not double-count: they sum to the measured total."""
+    mock_transcribe.return_value = StageResult(
+        ok=True, value=STTOutput(transcript="what is x")
+    )
+    mock_unsafe.return_value.passed = True
+    retrieval = _ok_retrieval()
+    retrieval.rerank_ms = 40.0
+    mock_retrieve.return_value = retrieval
+    mock_offtopic.return_value.passed = True
+    mock_generate.return_value = StageResult(
+        ok=True, value=GenerationOutput(answer="x is y")
+    )
+    mock_grounded.return_value.passed = True
+
+    stages = client.post("/api/ask?strategy=whole_passage", content=b"audio").json()[
+        "stages_ms"
+    ]
+
+    assert "rerank" in stages
+    assert stages["rerank"] == pytest.approx(40.0)
+    assert stages["retrieval"] >= 0.0

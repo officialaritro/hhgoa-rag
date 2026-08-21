@@ -54,10 +54,15 @@
 
     .strategy-group {
       display: flex;
+      /* Wraps because the slate is ten strategies, not two: a single
+         non-wrapping row overflowed the viewport on any normal screen. */
+      flex-wrap: wrap;
+      justify-content: center;
+      max-width: min(760px, 92vw);
       background: var(--glass);
       border: 1px solid var(--glass-border);
-      border-radius: 999px;
-      padding: 4px;
+      border-radius: 22px;
+      padding: 6px;
       gap: 4px;
       backdrop-filter: blur(10px);
       -webkit-backdrop-filter: blur(10px);
@@ -65,13 +70,59 @@
     }
 
     .strategy-group label {
-      padding: 6px 16px;
+      padding: 5px 12px;
       border-radius: 999px;
       font-size: 0.85rem;
       font-weight: 500;
       color: var(--text-muted);
       cursor: pointer;
       transition: all 0.2s ease;
+    }
+
+    /* Axis groups: the four axes are the argument for a "vast" chunking
+       strategy, so the pills are labelled by what each one varies rather than
+       presented as one undifferentiated row of ten. */
+    .strategy-axis {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      padding: 2px 4px 2px 8px;
+      border-radius: 18px;
+      background: rgba(255, 255, 255, 0.03);
+    }
+    .strategy-axis-name {
+      font-size: 0.6rem;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      margin-right: 2px;
+      user-select: none;
+    }
+
+    /* A refusal is a result, not an error string: which guard fired, why, and
+       the score against the bar it had to clear. */
+    .refusal-block {
+      display: flex;
+      flex-direction: column;
+      gap: 0.3rem;
+      align-items: flex-start;
+    }
+    .refusal-guard {
+      font-size: 0.68rem;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--red);
+      border: 1px solid color-mix(in srgb, var(--red) 45%, transparent);
+      border-radius: 999px;
+      padding: 2px 9px;
+    }
+    .refusal-detail { color: var(--red); font-weight: 500; }
+    .refusal-score {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      font-variant-numeric: tabular-nums;
     }
 
     .strategy-group input { display: none; }
@@ -97,11 +148,25 @@
     /* Compare grid */
     .compare-grid {
       display: grid;
-      grid-template-columns: 1fr 1fr;
+      /* auto-fit, not a fixed 1fr 1fr: the compared set is chosen by the
+         server (four granularities by default) and can be overridden per
+         request, so the column count is not known here. */
+      grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
       gap: 1rem;
     }
     @media (max-width: 640px) {
       .compare-grid { grid-template-columns: 1fr; }
+    }
+    .compare-column h3 { display: flex; align-items: baseline; gap: 0.5rem; }
+    .axis-badge {
+      font-size: 0.65rem;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      border: 1px solid var(--glass-border);
+      border-radius: 999px;
+      padding: 2px 7px;
     }
     .compare-column h3 { margin-bottom: 0.75rem; }
     .compare-column .answer { font-size: 1rem; color: #fff; margin: 0 0 1rem 0; line-height: 1.5; }
@@ -362,7 +427,9 @@
     }
     body.state-done .result-latency-card { animation-delay: 0.08s; }
     body.state-done .result-citations-card { animation-delay: 0.16s; }
-    body.state-done #compareCol_semantic { animation-delay: 0.1s; }
+    body.state-done .compare-column:nth-child(2) { animation-delay: 0.06s; }
+    body.state-done .compare-column:nth-child(3) { animation-delay: 0.12s; }
+    body.state-done .compare-column:nth-child(4) { animation-delay: 0.18s; }
 
     /* State: error */
     body.state-error .mic-button { border-color: var(--red); color: var(--red); }
@@ -416,6 +483,9 @@
       <p id="transcript" class="result-transcript"></p>
       <h3>Answer</h3>
       <div id="answer" aria-live="polite"></div>
+      <!-- The retrieval score against the threshold it had to clear, shown on
+           successful answers too, not only refusals. -->
+      <div id="answerScore" class="refusal-score" style="display: none;"></div>
     </div>
 
     <div class="card result-latency-card">
@@ -435,20 +505,10 @@
       <p id="compareRefusal" class="refusal" style="display: none;" aria-live="polite"></p>
     </div>
 
-    <div class="compare-grid">
-      <div class="card compare-column" id="compareCol_fixed_size">
-        <h3>fixed-size</h3>
-        <div class="answer" aria-live="polite"></div>
-        <div class="latency"></div>
-        <div class="citations"></div>
-      </div>
-      <div class="card compare-column" id="compareCol_semantic">
-        <h3>semantic</h3>
-        <div class="answer" aria-live="polite"></div>
-        <div class="latency"></div>
-        <div class="citations"></div>
-      </div>
-    </div>
+    <!-- Columns are built from the response: /api/compare decides which
+         strategies it compares, and hardcoding them here meant a change to
+         that set silently broke this view. -->
+    <div class="compare-grid"></div>
   </div>
 
   <script src="/static/app.js"></script>

@@ -34,6 +34,20 @@ class RetrievalOutput(BaseModel):
     query: str
     strategy: str
     passages: list[RetrievedPassage]
+    # What reranking cost, or None when it did not run. None rather than 0.0 so a
+    # caller can omit the stage entirely instead of drawing a zero-width bar that
+    # implies it ran. Reranking is ~53ms of a 73ms retrieval stage on the
+    # instance, so folding it into one number hides the largest quality change in
+    # the pipeline from the latency breakdown.
+    rerank_ms: float | None = None
+    # The best dense similarity over the candidate pool, BEFORE reranking
+    # reordered and truncated it. This is what the off-topic threshold is
+    # calibrated against (scripts/calibrate_thresholds.py searches the index and
+    # takes the top score), so it is what the guard must be given. A max over the
+    # returned passages is a different, lower quantity whenever the reranker
+    # demotes the highest-cosine passage out of the returned k -- which refused
+    # "what is the capital of France?" on the live service.
+    top_dense_score: float = 0.0
 
 
 class GenerationInput(BaseModel):

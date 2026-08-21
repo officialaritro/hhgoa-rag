@@ -54,9 +54,12 @@ def boundary_latencies(
       B  A plus answer generation
       C  the full round trip the user waits for, including speech-to-text
 
-    Boundary A sums every stage whose name is `retrieval` or begins with
+    Boundary A sums `retrieval`, `rerank`, and every stage beginning with
     `guardrail`, rather than an explicit list, so a guardrail added later cannot
-    quietly fall outside the boundary the 200ms claim is made against.
+    quietly fall outside the boundary the 200ms claim is made against. `rerank`
+    is named explicitly because it is inside that boundary: when it was split
+    out of `retrieval` into its own stage, a rule matching only `retrieval` and
+    `guardrail*` would have silently dropped ~53ms from every figure.
     """
     owned: list[float] = []
     with_generation: list[float] = []
@@ -65,7 +68,7 @@ def boundary_latencies(
         a = sum(
             value
             for name, value in stages.items()
-            if name == "retrieval" or name.startswith("guardrail")
+            if name in {"retrieval", "rerank"} or name.startswith("guardrail")
         )
         owned.append(a)
         with_generation.append(a + stages.get("generation", 0.0))

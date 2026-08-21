@@ -16,6 +16,7 @@ Two things here are correctness fixes, not features:
     chunking with a smaller window.
 """
 
+import time
 from functools import cache
 
 import numpy as np
@@ -136,6 +137,7 @@ def _compose(query: str, strategy: str, k: int) -> RetrievalOutput:
         rankings.append([pid for pid, _ in _load_bm25().top_k(query, depth)])
 
     fused = reciprocal_rank_fusion(rankings)
+    top_dense = max(cosines.values(), default=0.0)
     found = [
         RetrievedPassage(
             text=passages[parent_id]["text"],
@@ -147,7 +149,12 @@ def _compose(query: str, strategy: str, k: int) -> RetrievalOutput:
         )
         for parent_id, _ in fused[:k]
     ]
-    return RetrievalOutput(query=query, strategy=strategy, passages=found)
+    return RetrievalOutput(
+        query=query,
+        strategy=strategy,
+        passages=found,
+        top_dense_score=top_dense,
+    )
 
 
 def retrieve(query: str, strategy: str, k: int = 5) -> RetrievalOutput:
@@ -162,6 +169,7 @@ def retrieve(query: str, strategy: str, k: int = 5) -> RetrievalOutput:
 
     seen_parents: set[int] = set()
     found: list[RetrievedPassage] = []
+    top_dense = 0.0
     for score, row_id in zip(scores[0], indices[0]):
         # FAISS pads with -1 when it cannot fill the request. Indexing the span
         # rows with -1 would silently return the last chunk in the store as a
@@ -173,6 +181,7 @@ def retrieve(query: str, strategy: str, k: int = 5) -> RetrievalOutput:
         if parent_id in seen_parents:
             continue
         seen_parents.add(parent_id)
+        top_dense = max(top_dense, float(score))
 
         text = resolve_text(row, passages)
         # A chunk carrying its own text spans several passages (query_group), so
@@ -206,9 +215,18 @@ def retrieve(query: str, strategy: str, k: int = 5) -> RetrievalOutput:
         if len(found) >= max(k, RERANK_DEPTH):
             break
 
+    rerank_ms: float | None = None
     if reranking_enabled():
+        started = time.perf_counter()
         found = rerank_passages(query, found, top_k=k)
+        rerank_ms = (time.perf_counter() - started) * 1000
     else:
         found = found[:k]
 
-    return RetrievalOutput(query=query, strategy=strategy, passages=found)
+    return RetrievalOutput(
+        query=query,
+        strategy=strategy,
+        passages=found,
+        rerank_ms=rerank_ms,
+        top_dense_score=top_dense,
+    )

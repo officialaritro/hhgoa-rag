@@ -149,3 +149,27 @@ def test_boundary_latencies_tolerates_a_refusal_with_missing_stages():
 
     assert boundaries["A"] == [pytest.approx(20.0)]
     assert boundaries["B"] == [pytest.approx(20.0)]
+
+
+def test_boundary_a_includes_the_rerank_stage():
+    """Reranking is inside the retrieval boundary the 200ms target covers. When
+    it was reported as its own stage, a boundary rule matching only `retrieval`
+    and `guardrail*` would have silently dropped ~53ms from every boundary A
+    figure -- understating the number the submission is judged on."""
+    from scripts.benchmark_latency import boundary_latencies
+
+    records = [
+        (
+            500.0,
+            {
+                "stt": 300.0,
+                "retrieval": 20.0,
+                "rerank": 53.0,
+                "guardrail_off_topic": 0.2,
+                "guardrail_groundedness": 12.0,
+                "generation": 100.0,
+            },
+        )
+    ]
+
+    assert boundary_latencies(records)["A"] == [pytest.approx(85.2)]

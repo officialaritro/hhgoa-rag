@@ -21,7 +21,12 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.generation import generate_answer
-from app.guardrails import check_groundedness, check_off_topic, check_unsafe_input
+from app.guardrails import (
+    check_groundedness,
+    check_off_topic,
+    check_unsafe_input,
+    offtopic_threshold,
+)
 from app.retrieval import retrieve
 from app.strategies import get, served_names
 from app.stt import transcribe
@@ -105,6 +110,7 @@ def _refusal(
     strategy: str,
     transcript: str | None = None,
     top_score: float | None = None,
+    refused_by: str | None = None,
 ) -> dict[str, Any]:
     # Transcript is echoed back even on refusal: TS-002/TS-003 both expect the
     # user to see what was heard before being told it cannot be answered.
@@ -122,10 +128,14 @@ def _refusal(
         "transcript": transcript,
         "answer": None,
         "refusal_reason": reason,
+        # Which check refused, as a stable name the UI can style on. The reason
+        # string is prose for a person; this is for the client.
+        "refused_by": refused_by,
         "latency_ms": latency_ms,
         "stages_ms": stages,
         "strategy": strategy,
         "top_score": top_score,
+        "offtopic_threshold": None,
         "passages": [],
     }
 
@@ -143,24 +153,46 @@ async def _run_strategy_pipeline(transcript: str, strategy: str) -> dict[str, An
 
     mark = time.perf_counter()
     retrieval = await run_in_threadpool(retrieve, query=transcript, strategy=strategy)
-    stages["retrieval"] = _elapsed_ms(mark)
+    total_retrieval_ms = _elapsed_ms(mark)
+    # Reported as two stages so the latency chart shows what the cross-encoder
+    # costs -- ~53ms of ~73ms on the instance. They partition the measured total
+    # rather than overlapping it, and boundary A sums both (see
+    # scripts/benchmark_latency.py), so nothing is double-counted or dropped.
+    if retrieval.rerank_ms is not None:
+        stages["retrieval"] = max(0.0, total_retrieval_ms - retrieval.rerank_ms)
+        stages["rerank"] = retrieval.rerank_ms
+    else:
+        stages["retrieval"] = total_retrieval_ms
     passages = [p.model_dump() for p in retrieval.passages]
 
     mark = time.perf_counter()
-    # max, not passages[0]: the reranker reorders by cross-encoder relevance, so
-    # the first passage is no longer necessarily the highest cosine. The guard
-    # asks "is anything in the corpus close enough to this question", which is a
-    # max over the candidates -- reading position zero would let a reranker
-    # promotion cause a false refusal.
-    top_score = max((p.score for p in retrieval.passages), default=0.0)
+    # The best dense score over the candidate pool BEFORE reranking truncated
+    # it, which is the quantity the threshold was calibrated on. Neither
+    # passages[0].score nor a max over the returned passages is that: the
+    # reranker reorders a pool of 10 and returns 5, so both read a lower number
+    # than calibration measured whenever it demotes the top-cosine passage. That
+    # refused "what is the capital of France?" on the live service at 0.564
+    # against a 0.564 threshold, while three other strategies answered it.
+    top_score = retrieval.top_dense_score
     off_topic = check_off_topic(top_similarity_score=top_score, strategy=strategy)
     stages["guardrail_off_topic"] = _elapsed_ms(mark)
+
+    # The bar this score had to clear. Reported on success as well as refusal: a
+    # similarity means nothing without it, and it is what makes the per-index
+    # calibration visible instead of a claim in a document.
+    try:
+        threshold: float | None = offtopic_threshold(strategy)
+    except Exception:  # noqa: BLE001 -- a composed or uncalibrated strategy
+        threshold = None
+
     if not off_topic.passed:
         return {
             "answer": None,
             "refusal_reason": off_topic.reason,
+            "refused_by": "off_topic",
             "stages_ms": stages,
             "top_score": top_score,
+            "offtopic_threshold": threshold,
             "passages": passages,
         }
 
@@ -173,8 +205,10 @@ async def _run_strategy_pipeline(transcript: str, strategy: str) -> dict[str, An
         return {
             "answer": None,
             "refusal_reason": "could not generate an answer",
+            "refused_by": "generation",
             "stages_ms": stages,
             "top_score": top_score,
+            "offtopic_threshold": threshold,
             "passages": passages,
         }
 
@@ -190,8 +224,10 @@ async def _run_strategy_pipeline(transcript: str, strategy: str) -> dict[str, An
         return {
             "answer": None,
             "refusal_reason": "not in the retrieved passages",
+            "refused_by": "insufficient_context",
             "stages_ms": stages,
             "top_score": top_score,
+            "offtopic_threshold": threshold,
             "passages": passages,
         }
 
@@ -204,6 +240,7 @@ async def _run_strategy_pipeline(transcript: str, strategy: str) -> dict[str, An
         return {
             "answer": None,
             "refusal_reason": grounded.reason,
+            "refused_by": "groundedness",
             "stages_ms": stages,
             "top_score": top_score,
             "passages": passages,
@@ -212,8 +249,10 @@ async def _run_strategy_pipeline(transcript: str, strategy: str) -> dict[str, An
     return {
         "answer": answer,
         "refusal_reason": None,
+        "refused_by": None,
         "stages_ms": stages,
         "top_score": top_score,
+        "offtopic_threshold": threshold,
         "passages": passages,
     }
 
@@ -252,13 +291,25 @@ async def ask(
     stages["stt"] = _elapsed_ms(mark)
     if not stt_result.ok:
         return JSONResponse(
-            _refusal("could not process audio", _elapsed_ms(start), stages, strategy)
+            _refusal(
+                "could not process audio",
+                _elapsed_ms(start),
+                stages,
+                strategy,
+                refused_by="stt",
+            )
         )
 
     transcript = stt_result.value.transcript
     if not transcript.strip():
         return JSONResponse(
-            _refusal("could not understand audio", _elapsed_ms(start), stages, strategy)
+            _refusal(
+                "could not understand audio",
+                _elapsed_ms(start),
+                stages,
+                strategy,
+                refused_by="stt",
+            )
         )
 
     # Cheapest check first: pure regex, no model call, so it costs nothing to
@@ -268,7 +319,14 @@ async def ask(
     stages["guardrail_unsafe"] = _elapsed_ms(mark)
     if not unsafe.passed:
         return JSONResponse(
-            _refusal(unsafe.reason, _elapsed_ms(start), stages, strategy, transcript)
+            _refusal(
+                unsafe.reason,
+                _elapsed_ms(start),
+                stages,
+                strategy,
+                transcript,
+                refused_by="unsafe_input",
+            )
         )
 
     result = await _run_strategy_pipeline(transcript, strategy)
@@ -279,10 +337,12 @@ async def ask(
             "transcript": transcript,
             "answer": result["answer"],
             "refusal_reason": result["refusal_reason"],
+            "refused_by": result.get("refused_by"),
             "latency_ms": _elapsed_ms(start),
             "stages_ms": stages,
             "strategy": strategy,
             "top_score": result["top_score"],
+            "offtopic_threshold": result.get("offtopic_threshold"),
             "passages": result["passages"],
         }
     )
@@ -301,8 +361,10 @@ async def _run_strategy_pipeline_safe(transcript: str, strategy: str) -> dict[st
         return {
             "answer": None,
             "refusal_reason": "internal error",
+            "refused_by": "internal_error",
             "stages_ms": {},
             "top_score": None,
+            "offtopic_threshold": None,
             "passages": [],
         }
 
@@ -349,6 +411,7 @@ async def compare(
                 "latency_ms": _elapsed_ms(start),
                 "shared_stages_ms": shared_stages,
                 "refusal_reason": "could not process audio",
+                "refused_by": "stt",
                 "results": None,
             }
         )
@@ -361,6 +424,7 @@ async def compare(
                 "latency_ms": _elapsed_ms(start),
                 "shared_stages_ms": shared_stages,
                 "refusal_reason": "could not understand audio",
+                "refused_by": "stt",
                 "results": None,
             }
         )
@@ -375,6 +439,7 @@ async def compare(
                 "latency_ms": _elapsed_ms(start),
                 "shared_stages_ms": shared_stages,
                 "refusal_reason": unsafe.reason,
+                "refused_by": "unsafe_input",
                 "results": None,
             }
         )
