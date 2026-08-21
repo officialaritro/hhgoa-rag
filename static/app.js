@@ -101,49 +101,41 @@ function floatTo16BitPCM(float32Array) {
   return new Uint8Array(buffer);
 }
 
+/** The live waveform, drawn as a horizontal wave across the horizon the sun
+ *  sits on -- a sea line rather than the ring this used to draw. The ring
+ *  was sized for a square canvas and would be clipped by the wide, short
+ *  one the sun composition uses. */
 function drawVisualizer() {
   const canvas = $("visualizer");
   const ctx = canvas.getContext("2d");
   const width = canvas.width;
   const height = canvas.height;
-  
+
   if (!analyserNode || !recording) {
     ctx.clearRect(0, 0, width, height);
     return;
   }
-  
+
   const bufferLength = analyserNode.frequencyBinCount;
   const dataArray = new Uint8Array(bufferLength);
   analyserNode.getByteTimeDomainData(dataArray);
-  
+
   ctx.clearRect(0, 0, width, height);
-  ctx.lineWidth = 3;
-  ctx.strokeStyle = "rgba(239, 68, 68, 0.8)";
+  ctx.lineWidth = 2.5;
+  ctx.lineJoin = "round";
+  ctx.strokeStyle = "#ff0080";
   ctx.beginPath();
-  
-  const centerX = width / 2;
-  const centerY = height / 2;
-  const baseRadius = 60;
-  
+
+  const mid = height / 2;
   for (let i = 0; i < bufferLength; i++) {
-    const v = dataArray[i] / 128.0; 
-    const mappedV = 1.0 + (v - 1.0) * 1.5; 
-    const radius = baseRadius + (mappedV * 15);
-    
-    const angle = (i / bufferLength) * 2 * Math.PI;
-    const x = centerX + radius * Math.cos(angle);
-    const y = centerY + radius * Math.sin(angle);
-    
-    if (i === 0) {
-      ctx.moveTo(x, y);
-    } else {
-      ctx.lineTo(x, y);
-    }
+    const v = (dataArray[i] - 128) / 128;
+    const x = (i / (bufferLength - 1)) * width;
+    const y = mid + v * (height * 0.42);
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
   }
-  
-  ctx.closePath();
   ctx.stroke();
-  
+
   animationId = requestAnimationFrame(drawVisualizer);
 }
 
@@ -158,7 +150,7 @@ async function startRecording() {
   } catch (err) {
     recording = false;
     setState("error");
-    $("statusText").textContent = "Microphone access denied.";
+    $("statusText").textContent = "MICROPHONE BLOCKED";
     return;
   }
   
@@ -177,7 +169,7 @@ async function startRecording() {
   analyserNode.connect(processorNode);
   processorNode.connect(audioContext.destination);
   
-  $("statusText").textContent = "Recording...";
+  $("statusText").textContent = "LISTENING";
   drawVisualizer();
 }
 
@@ -201,6 +193,126 @@ const STAGE_LABELS = {
   generation: "Generation (Claude)",
   guardrail_groundedness: "Guardrail · groundedness",
 };
+
+/* ====================================================================
+   The sun is the pipeline.
+   One ray per stage, radiating from a half-disc sitting on the horizon.
+   Ray length encodes that stage's share of total latency; the exact
+   numbers stay in the latency card, so the sun carries the shape of the
+   run and never becomes the only place a number is legible.
+
+   Geometry matches the viewBox in index.html: 0 0 400 190, horizon at
+   y=170, disc centred at (200,170) r=40.
+   ==================================================================== */
+const SUN_CX = 200;
+const SUN_CY = 170;
+const RAY_INNER = 52;
+// A stage that measures 0.0 ms still gets a visible stub, so the corona
+// never has a gap that reads as a missing stage. Everything above the
+// floor is strictly proportional: len = RAY_MIN + share * RAY_SPAN, so
+// (len - RAY_MIN) / share is the same constant for every ray.
+const RAY_MIN = 15;
+const RAY_SPAN = 68;
+// Idle rays sit mid-arc so the corona reads as a sun before any query has
+// run. At RAY_MIN alone they rendered as tick marks with a band of dead
+// air above them.
+const RAY_IDLE_FACTOR = 0.62;
+// Rays fan across 160 degrees rather than a full 180 so the outermost
+// pair never lies flat along the horizon.
+const RAY_ARC_START = 10;
+const RAY_ARC_SWEEP = 160;
+
+let rayRevealTimers = [];
+
+function rayAngle(index, count) {
+  if (count <= 1) return Math.PI / 2;
+  const deg = RAY_ARC_START + (index * RAY_ARC_SWEEP) / (count - 1);
+  return (deg * Math.PI) / 180;
+}
+
+function buildRays(stageKeys, initialFactor = 0) {
+  const group = document.getElementById("rayGroup");
+  if (!group) return;
+  const reach = RAY_INNER + RAY_MIN + RAY_SPAN * initialFactor;
+  group.innerHTML = stageKeys
+    .map((key, i) => {
+      const a = rayAngle(i, stageKeys.length);
+      const cos = Math.cos(a);
+      const sin = Math.sin(a);
+      const x1 = (SUN_CX + RAY_INNER * cos).toFixed(2);
+      const y1 = (SUN_CY - RAY_INNER * sin).toFixed(2);
+      const x2 = (SUN_CX + reach * cos).toFixed(2);
+      const y2 = (SUN_CY - reach * sin).toFixed(2);
+      return `<line class="ray" data-stage="${key}" x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}"><title>${
+        STAGE_LABELS[key] || key
+      }</title></line>`;
+    })
+    .join("");
+}
+
+function clearRayReveal() {
+  for (const t of rayRevealTimers) clearTimeout(t);
+  rayRevealTimers = [];
+}
+
+function resetRays() {
+  clearRayReveal();
+  buildRays(Object.keys(STAGE_LABELS), RAY_IDLE_FACTOR);
+}
+
+/** Light the rays in stage order, sized by each stage's share of the total.
+ *
+ * The reveal is sequenced rather than instant because the order carries
+ * real information -- it is the pipeline's execution order, straight off
+ * the response's own key order. It deliberately does NOT claim live
+ * per-stage progress: the API returns every stage at once, so animating
+ * during the request would be inventing timing we never measured. The
+ * in-flight state is an explicit indeterminate sweep instead.
+ */
+function revealRays(stagesMs) {
+  clearRayReveal();
+  const entries = Object.entries(stagesMs || {});
+  if (!entries.length) return resetRays();
+
+  buildRays(entries.map(([k]) => k));
+  const total = entries.reduce((sum, [, ms]) => sum + ms, 0);
+  const group = document.getElementById("rayGroup");
+  if (!group) return;
+  const rays = [...group.querySelectorAll(".ray")];
+
+  rays.forEach((ray, i) => {
+    const ms = entries[i] ? entries[i][1] : 0;
+    const share = total > 0 ? ms / total : 0;
+    const len = RAY_INNER + RAY_MIN + share * RAY_SPAN;
+    const a = rayAngle(i, rays.length);
+    rayRevealTimers.push(
+      setTimeout(() => {
+        ray.setAttribute("x2", (SUN_CX + len * Math.cos(a)).toFixed(3));
+        ray.setAttribute("y2", (SUN_CY - len * Math.sin(a)).toFixed(3));
+        ray.classList.add("is-lit");
+        ray.dataset.ms = ms.toFixed(1);
+        // Recorded at full precision, not re-derived from the rounded x2/y2:
+        // on a stage worth 0.4% of the run, 2dp coordinate rounding moves the
+        // implied proportionality constant by more than a unit.
+        ray.dataset.share = share.toFixed(6);
+        ray.dataset.len = (len - RAY_INNER).toFixed(4);
+      }, i * 70)
+    );
+  });
+}
+
+/** Compare mode runs its strategies concurrently, so the wall clock the
+ *  user actually waited is the shared stages plus the slowest branch at
+ *  each stage -- not any single strategy's column. */
+function mergeCompareStages(data) {
+  const merged = { ...(data.shared_stages_ms || {}) };
+  for (const result of Object.values(data.results || {})) {
+    for (const [key, ms] of Object.entries(result.stages_ms || {})) {
+      merged[key] = Math.max(merged[key] || 0, ms);
+    }
+  }
+  return merged;
+}
 
 
 // Which check refused, keyed on the server's `refused_by`. The task asks the
@@ -330,6 +442,7 @@ function displayResult(data) {
   $("answerScore").style.display = note ? "block" : "none";
   renderLatency(data);
   renderCitations(data.passages, $("citations"));
+  revealRays(data.stages_ms);
   $("outputContainer").style.display = "grid";
   $("compareContainer").style.display = "none";
 }
@@ -356,7 +469,7 @@ function displayCompareResult(data) {
         const axis = (strategyDetails[s] || {}).axis;
         const badge = axis ? `<span class="axis-badge">${axis}</span>` : "";
         return `<div class="card compare-column" id="compareCol_${s}">
-             <h3>${prettyStrategy(s)}${badge}</h3>
+             <h2>${prettyStrategy(s)}${badge}</h2>
              <div class="answer" aria-live="polite"></div>
              <div class="latency"></div>
              <div class="citations"></div>
@@ -388,6 +501,7 @@ function displayCompareResult(data) {
       col.querySelector(".citations").innerHTML = buildCitationsHtml(result.passages);
     }
   }
+  revealRays(mergeCompareStages(data));
   $("outputContainer").style.display = "none";
   $("compareContainer").style.display = "grid";
 }
@@ -405,8 +519,9 @@ function cancelRecording() {
   recording = false;
   teardownAudioGraph();
   capturedChunks = [];
+  resetRays();
   setState("idle");
-  $("statusText").textContent = "Hold to speak";
+  $("statusText").textContent = "HOLD TO SPEAK";
 }
 
 async function stopRecording() {
@@ -429,7 +544,7 @@ async function stopRecording() {
   }
   setState("processing");
   teardownAudioGraph();
-  $("statusText").textContent = "Processing...";
+  $("statusText").textContent = "RETRIEVING";
 
   const audioBytes = concatenateChunks(capturedChunks);
   const endpoint = compareMode
@@ -508,7 +623,7 @@ async function loadStrategies() {
                <label for="strat_${s}"${tip}>${prettyStrategy(s)}</label>`;
           })
           .join("");
-        return `<div class="strategy-axis"><span class="strategy-axis-name">${axis}</span>${pills}</div>`;
+        return `<div class="axis"><span class="axis-name">${axis}</span>${pills}</div>`;
       })
       .join("");
     for (const input of document.querySelectorAll('input[name="strategy"]')) {
@@ -517,7 +632,7 @@ async function loadStrategies() {
       });
     }
   } catch {
-    $("strategyChoices").innerHTML = '<span style="font-size: 0.8rem; padding: 6px 16px; color: var(--text-muted);">unavailable</span>';
+    $("strategyChoices").innerHTML = '<span class="axis-name">UNAVAILABLE</span>';
   }
 }
 
@@ -581,4 +696,5 @@ $("compareToggle").addEventListener("change", (e) => {
   $("strategyChoices").style.pointerEvents = compareMode ? "none" : "";
 });
 
+resetRays();
 loadStrategies();

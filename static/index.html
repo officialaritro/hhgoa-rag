@@ -3,513 +3,752 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
-  <meta name="theme-color" content="#0a0a0f" />
-  <title>Voice-Enabled RAG Pipeline</title>
+  <meta name="theme-color" content="#0b6839" />
+  <title>Voice RAG · Hacker House Goa 2026</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Imbue:opsz,wght@10..100,500&family=Victor+Mono:wght@400;500;700&display=swap" rel="stylesheet">
   <style>
+    /* ------------------------------------------------------------------
+       Palette and type are not eyedropped -- they are the values read out
+       of hhgoa.com's own stylesheet (brand-primary / accent / pink /
+       offwhite, --font-imbue / --font-victor-mono), so this page sits in
+       the event's real design system rather than an impression of it.
+       Anything not in their four brand hexes is a derived shade and is
+       marked as such.
+       ------------------------------------------------------------------ */
     :root {
-      --bg: #0a0a0f;
-      --bg-radial: radial-gradient(circle at 50% 30%, #1a1a2e 0%, #0a0a0f 70%);
-      --text: #e2e8f0;
-      --text-muted: #94a3b8;
-      --accent: #6366f1;
-      --accent-glow: rgba(99, 102, 241, 0.4);
-      --red: #ef4444;
-      --glass: rgba(255, 255, 255, 0.03);
-      --glass-border: rgba(255, 255, 255, 0.08);
+      --green: #0b6839;        /* brand-primary */
+      --yellow: #fee101;       /* brand-accent  */
+      --pink: #ff0080;         /* brand-pink    */
+      --cream: #fffbe8;        /* brand-offwhite */
+
+      /* Derived. --green-deep is the display type's drop shadow and the
+         pattern ground; --ink is the line-art outline colour their
+         illustrations use; --leaf is the pale green in the tile florets. */
+      --green-deep: #074a28;
+      --ink: #042415;
+      --leaf: #93c47d;
+
+      --display: 'Imbue', 'Playfair Display', Georgia, serif;
+      --mono: 'Victor Mono', ui-monospace, 'SFMono-Regular', Menlo, monospace;
+
       color-scheme: dark;
     }
-    
-    * { box-sizing: border-box; }
-    
+
+    *, *::before, *::after { box-sizing: border-box; }
+
+    html { -webkit-text-size-adjust: 100%; }
+
     body {
       margin: 0;
-      padding: 0;
-      font-family: 'Inter', -apple-system, sans-serif;
-      background: var(--bg);
-      background-image: var(--bg-radial);
-      color: var(--text);
       min-height: 100vh;
+      background: var(--green);
+      color: var(--cream);
+      font-family: var(--mono);
+      font-size: 16px;
+      line-height: 1.6;
+      overflow-x: hidden;
+      -webkit-font-smoothing: antialiased;
       display: flex;
       flex-direction: column;
-      align-items: center;
-      overflow-x: hidden;
-      line-height: 1.6;
-      -webkit-font-smoothing: antialiased;
     }
 
-    /* Strategy Pill Selector */
-    .header {
-      width: 100%;
-      padding: 2rem 1.5rem;
+    /* --- Azulejo tile strip -------------------------------------------
+       Their most distinctive border device (the APPLY button's edge, the
+       section rules). Authored here as a repeating inline SVG rather than
+       lifted as an image: it scales, recolours, and costs no request. */
+    .tile-strip {
+      height: 18px;
+      flex: none;
+      background-repeat: repeat-x;
+      background-size: auto 18px;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='44' height='18' viewBox='0 0 44 18'%3E%3Crect width='44' height='18' fill='%23074a28'/%3E%3Cg fill='%2393c47d'%3E%3Ccircle cx='11' cy='4.6' r='3.1'/%3E%3Ccircle cx='11' cy='13.4' r='3.1'/%3E%3Ccircle cx='6.6' cy='9' r='3.1'/%3E%3Ccircle cx='15.4' cy='9' r='3.1'/%3E%3C/g%3E%3Ccircle cx='11' cy='9' r='2.2' fill='%23074a28'/%3E%3Crect x='29.5' y='6.5' width='5' height='5' transform='rotate(45 32 9)' fill='%23ff0080'/%3E%3C/svg%3E");
+    }
+
+    /* --- Top bar ------------------------------------------------------ */
+    .topbar {
+      flex: none;
+      position: relative;
+      z-index: 3;
       display: flex;
-      justify-content: center;
       align-items: center;
+      justify-content: space-between;
+      gap: 1rem 1.5rem;
       flex-wrap: wrap;
-      gap: 1rem;
-      z-index: 10;
+      padding: 1.1rem clamp(1rem, 3vw, 2.25rem);
     }
 
-    .strategy-group {
-      display: flex;
-      /* Wraps because the slate is ten strategies, not two: a single
-         non-wrapping row overflowed the viewport on any normal screen. */
-      flex-wrap: wrap;
-      justify-content: center;
-      max-width: min(760px, 92vw);
-      background: var(--glass);
-      border: 1px solid var(--glass-border);
-      border-radius: 22px;
-      padding: 6px;
-      gap: 4px;
-      backdrop-filter: blur(10px);
-      -webkit-backdrop-filter: blur(10px);
-      transition: opacity 0.2s ease;
-    }
-
-    .strategy-group label {
-      padding: 5px 12px;
-      border-radius: 999px;
-      font-size: 0.85rem;
-      font-weight: 500;
-      color: var(--text-muted);
-      cursor: pointer;
-      transition: all 0.2s ease;
-    }
-
-    /* Axis groups: the four axes are the argument for a "vast" chunking
-       strategy, so the pills are labelled by what each one varies rather than
-       presented as one undifferentiated row of ten. */
-    .strategy-axis {
-      display: flex;
-      align-items: center;
-      gap: 4px;
-      padding: 2px 4px 2px 8px;
-      border-radius: 18px;
-      background: rgba(255, 255, 255, 0.03);
-    }
-    .strategy-axis-name {
-      font-size: 0.6rem;
+    .wordmark {
+      font-family: var(--mono);
       font-weight: 700;
-      letter-spacing: 0.08em;
-      text-transform: uppercase;
-      color: var(--text-muted);
+      font-size: 0.82rem;
+      letter-spacing: 0.16em;
+      color: var(--yellow);
+      white-space: nowrap;
+    }
+    .wordmark span { color: var(--cream); opacity: 0.55; }
+
+    /* Ten strategies across five axes. Grouped by axis, because the axes
+       are the actual argument for "vast chunking" -- an undifferentiated
+       row of ten names makes the same point badly. */
+    .strategy-rack {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 5px;
+      transition: opacity 0.25s ease;
+    }
+    .axis {
+      display: flex;
+      align-items: center;
+      gap: 3px;
+      padding: 3px 5px 3px 9px;
+      border: 1px solid rgba(255, 251, 232, 0.16);
+      border-radius: 3px;
+      background: rgba(4, 36, 21, 0.32);
+    }
+    .axis-name {
+      font-size: 0.7rem;
+      font-weight: 700;
+      letter-spacing: 0.14em;
+      color: var(--cream);
       margin-right: 2px;
       user-select: none;
     }
-
-    /* A refusal is a result, not an error string: which guard fired, why, and
-       the score against the bar it had to clear. */
-    .refusal-block {
-      display: flex;
-      flex-direction: column;
-      gap: 0.3rem;
-      align-items: flex-start;
-    }
-    .refusal-guard {
-      font-size: 0.68rem;
-      font-weight: 700;
-      letter-spacing: 0.06em;
-      text-transform: uppercase;
-      color: var(--red);
-      border: 1px solid color-mix(in srgb, var(--red) 45%, transparent);
-      border-radius: 999px;
-      padding: 2px 9px;
-    }
-    .refusal-detail { color: var(--red); font-weight: 500; }
-    .refusal-score {
+    .strategy-rack input { position: absolute; opacity: 0; pointer-events: none; }
+    .strategy-rack label {
+      padding: 3px 9px;
+      border-radius: 2px;
       font-size: 0.75rem;
-      color: var(--text-muted);
-      font-variant-numeric: tabular-nums;
+      letter-spacing: 0.02em;
+      color: var(--cream);
+      opacity: 0.62;
+      cursor: pointer;
+      transition: background 0.18s ease, color 0.18s ease, opacity 0.18s ease;
+      white-space: nowrap;
+    }
+    .strategy-rack label:hover { opacity: 1; }
+    .strategy-rack input:checked + label {
+      background: var(--yellow);
+      color: var(--ink);
+      opacity: 1;
+      font-weight: 700;
+    }
+    .strategy-rack input:focus-visible + label {
+      outline: 2px solid var(--yellow);
+      outline-offset: 2px;
+      opacity: 1;
     }
 
-    .strategy-group input { display: none; }
-    .strategy-group input:checked + label {
-      background: rgba(255, 255, 255, 0.1);
-      color: #fff;
-    }
-
-    /* Compare toggle */
     .compare-toggle {
       display: flex;
       align-items: center;
       gap: 0.5rem;
-      font-size: 0.85rem;
-      font-weight: 500;
-      color: var(--text-muted);
+      font-size: 0.74rem;
+      font-weight: 700;
+      letter-spacing: 0.11em;
+      color: var(--cream);
+      opacity: 0.7;
       cursor: pointer;
       user-select: none;
+      white-space: nowrap;
+      transition: opacity 0.18s ease;
     }
-    .compare-toggle input { accent-color: var(--accent); width: 16px; height: 16px; cursor: pointer; }
-    .compare-toggle:has(input:checked) { color: #fff; }
+    .compare-toggle:hover { opacity: 1; }
+    .compare-toggle:has(input:checked) { opacity: 1; color: var(--yellow); }
+    .compare-toggle input { accent-color: var(--pink); width: 15px; height: 15px; cursor: pointer; }
+    /* Was falling back to the UA's blue ring, the one off-palette focus state. */
+    .compare-toggle input:focus-visible { outline: 2px solid var(--yellow); outline-offset: 3px; }
 
-    /* Compare grid */
-    .compare-grid {
-      display: grid;
-      /* auto-fit, not a fixed 1fr 1fr: the compared set is chosen by the
-         server (four granularities by default) and can be overridden per
-         request, so the column count is not known here. */
-      grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-      gap: 1rem;
-    }
-    @media (max-width: 640px) {
-      .compare-grid { grid-template-columns: 1fr; }
-    }
-    .compare-column h3 { display: flex; align-items: baseline; gap: 0.5rem; }
-    .axis-badge {
-      font-size: 0.65rem;
-      font-weight: 600;
-      letter-spacing: 0.04em;
-      text-transform: uppercase;
-      color: var(--text-muted);
-      border: 1px solid var(--glass-border);
-      border-radius: 999px;
-      padding: 2px 7px;
-    }
-    .compare-column h3 { margin-bottom: 0.75rem; }
-    .compare-column .answer { font-size: 1rem; color: #fff; margin: 0 0 1rem 0; line-height: 1.5; }
-    .compare-column .answer.refusal { color: var(--red) !important; font-weight: 500; }
-
-    /* Central Mic UI */
-    .mic-container {
-      flex: 1;
+    /* --- Hero --------------------------------------------------------- */
+    .stage {
+      flex: 1 0 auto;
+      position: relative;
+      z-index: 2;
       display: flex;
       flex-direction: column;
       align-items: center;
-      justify-content: center;
+      justify-content: flex-start;
+      width: 100%;
+    }
+
+    .hero {
+      text-align: center;
+      padding: clamp(0.25rem, 1.5vh, 1rem) 1rem 0;
+    }
+
+    /* Imbue at display size with their offset shadow. opsz is pushed to
+       the top of the axis: at 100 the Didone contrast is at its most
+       extreme, which is the look their wordmark has. */
+    .hero-title {
+      margin: 0;
+      font-family: var(--display);
+      font-weight: 500;
+      font-variation-settings: 'opsz' 100;
+      font-size: clamp(3.4rem, 12.5vw, 10.5rem);
+      line-height: 0.82;
+      letter-spacing: 0.005em;
+      color: var(--yellow);
+      text-shadow: 0.035em 0.035em 0 var(--green-deep);
+      text-transform: uppercase;
+    }
+
+    .hero-sub {
+      margin: 0.85rem auto 0;
+      max-width: 62ch;
+      font-size: 0.76rem;
+      font-weight: 500;
+      letter-spacing: 0.11em;
+      color: var(--cream);
+    }
+    .hero-sub b { color: var(--yellow); font-weight: 700; }
+
+    /* --- Sun stage (the signature; wired up in app.js) ---------------- */
+    .sun-stage {
       position: relative;
       width: 100%;
-      min-height: 300px;
-    }
-    
-    .mic-status-text {
-      position: absolute;
-      top: 10%;
-      font-size: 0.9rem;
-      font-weight: 500;
-      color: var(--text-muted);
-      letter-spacing: 0.05em;
-      text-transform: uppercase;
-      opacity: 0;
-      transition: opacity 0.3s;
-    }
-
-    .mic-hint {
-      position: absolute;
-      bottom: 12%;
+      max-width: 560px;
+      margin-top: auto;
       display: flex;
+      flex-direction: column;
       align-items: center;
-      gap: 0.4rem;
-      font-size: 0.8rem;
-      color: var(--text-muted);
-      opacity: 0;
-      transition: opacity 0.3s;
+      flex: none;
     }
-    .mic-hint kbd {
-      font-family: inherit;
-      font-size: 0.75rem;
-      padding: 2px 8px;
-      border-radius: 6px;
-      background: var(--glass);
-      border: 1px solid var(--glass-border);
-      color: var(--text);
-    }
-    body.state-idle .mic-hint { opacity: 1; }
 
-    .visualizer-canvas {
+    /* 400 x 190 viewBox, horizon at y=170 -- app.js's ray geometry is
+       computed against exactly these numbers. */
+    .sun-wrap { position: relative; width: 100%; aspect-ratio: 400 / 162; }
+    .sun-svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+
+    .horizon { stroke: var(--yellow); stroke-width: 1.5; opacity: 0.3; }
+
+    .ray {
+      stroke: var(--yellow);
+      stroke-width: 3;
+      stroke-linecap: round;
+      opacity: 0.22;
+      /* x2/y2 are animated, not width -- a transition on geometry
+         attributes is a paint, not a layout reflow of the page. */
+      transition: opacity 0.3s ease, x2 0.5s cubic-bezier(0.16, 1, 0.3, 1), y2 0.5s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    .ray.is-lit { opacity: 1; }
+
+    .sun-disc { fill: var(--yellow); transform-origin: 200px 170px; }
+    .sun-glare { fill: var(--yellow); opacity: 0.09; }
+
+    /* The button is the sun's hit target: a real <button> sitting over the
+       disc, so keyboard and screen-reader behaviour is unchanged from the
+       plain mic button it replaces. */
+    /* Sits exactly over the disc: the disc spans x 160..240 of 400 (20% wide)
+       and rises 40 of 190 above a horizon that is 10.5% up from the bottom. */
+    .sun-hit {
       position: absolute;
-      top: 50%;
       left: 50%;
-      transform: translate(-50%, -50%);
-      width: 300px;
-      height: 300px;
-      pointer-events: none;
-      z-index: 1;
-      opacity: 0;
-      transition: opacity 0.3s;
-    }
-
-    .mic-button {
-      position: relative;
-      width: 80px;
-      height: 80px;
-      border-radius: 50%;
-      background: var(--glass);
-      border: 1px solid var(--glass-border);
-      color: var(--text);
+      bottom: 12.3%;
+      transform: translateX(-50%);
+      width: 20%;
+      height: 24.7%;
+      min-width: 76px;
+      min-height: 44px;
+      border: 0;
+      border-radius: 999px 999px 0 0;
+      background: transparent;
+      color: var(--ink);
       display: flex;
       align-items: center;
       justify-content: center;
       cursor: pointer;
-      z-index: 2;
-      backdrop-filter: blur(10px);
-      -webkit-backdrop-filter: blur(10px);
-      transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
       touch-action: none;
       user-select: none;
       -webkit-user-select: none;
-      box-shadow: 0 0 30px rgba(0,0,0,0.5);
+      z-index: 3;
     }
-    
-    .mic-button svg {
-      width: 32px;
-      height: 32px;
-      fill: currentColor;
-      transition: transform 0.3s;
-    }
-    
-    .mic-button:disabled {
-      opacity: 0.5;
-      cursor: not-allowed;
+    .sun-hit svg { width: 24px; height: 24px; fill: currentColor; }
+    .sun-hit:focus-visible { outline: 3px solid var(--cream); outline-offset: 4px; border-radius: 999px 999px 2px 2px; }
+    .sun-hit:disabled { cursor: not-allowed; opacity: 0.5; }
+
+    /* The waveform runs along the horizon the sun sits on. */
+    .visualizer-canvas {
+      position: absolute;
+      left: 50%;
+      bottom: 4%;
+      transform: translateX(-50%);
+      width: 85%;
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity 0.3s ease;
+      z-index: 2;
     }
 
-    /* Result Layout -- a wide dashboard grid once a query completes, not a
-       single narrow vertical stack. #outputContainer breaks into an
-       answer + sidebar row plus a full-width citations row at >=900px;
-       #compareContainer stays a single column here since its own
-       .compare-grid child already provides the two-up layout. */
+    .status-line {
+      margin-bottom: 0.3rem;
+      font-size: 0.74rem;
+      font-weight: 700;
+      letter-spacing: 0.19em;
+      color: var(--cream);
+      opacity: 0;
+      transition: opacity 0.25s ease;
+      min-height: 1.1em;
+    }
+    .mic-hint {
+      margin-bottom: 0.5rem;
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+      font-size: 0.74rem;
+      letter-spacing: 0.09em;
+      color: var(--cream);
+      opacity: 0;
+      transition: opacity 0.25s ease;
+    }
+    .mic-hint kbd {
+      font-family: var(--mono);
+      font-size: 0.72rem;
+      font-weight: 700;
+      padding: 2px 6px;
+      border-radius: 2px;
+      background: var(--yellow);
+      color: var(--ink);
+    }
+
+    /* --- Output surfaces ---------------------------------------------- */
     .output-container {
       width: 100%;
       max-width: 1180px;
-      padding: 0 1.5rem 3rem;
-      z-index: 10;
+      padding: clamp(1.25rem, 4vh, 2.75rem) clamp(1rem, 3vw, 2rem) 2rem;
       display: none;
       grid-template-columns: 1fr;
-      gap: 1.25rem;
-      transform: translateY(20px);
+      gap: 1.1rem;
       opacity: 0;
-      transition: opacity 0.5s cubic-bezier(0.16, 1, 0.3, 1), transform 0.5s cubic-bezier(0.16, 1, 0.3, 1);
     }
 
-    @media (min-width: 900px) {
+    @media (min-width: 940px) {
       #outputContainer {
-        grid-template-columns: 2fr 1fr;
-        grid-template-areas:
-          "answer sidebar"
-          "citations citations";
+        grid-template-columns: minmax(0, 1.85fr) minmax(0, 1fr);
+        grid-template-areas: "answer side" "cites cites";
       }
-      .result-answer-card { grid-area: answer; }
-      .result-latency-card { grid-area: sidebar; }
-      .result-citations-card { grid-area: citations; }
+      .card-answer { grid-area: answer; }
+      .card-latency { grid-area: side; }
+      .card-cites { grid-area: cites; }
     }
 
+    /* Cream board on green ground with a hard ink edge and an offset
+       shadow -- the painted-signboard treatment their illustrations use,
+       not a soft translucent panel. */
     .card {
-      background: var(--glass);
-      border: 1px solid var(--glass-border);
-      border-radius: 16px;
-      padding: 1.5rem;
-      backdrop-filter: blur(16px);
-      -webkit-backdrop-filter: blur(16px);
-      box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+      position: relative;
+      background: var(--cream);
+      color: var(--ink);
+      border: 2px solid var(--ink);
+      border-radius: 3px;
+      padding: 1.35rem 1.4rem;
+      box-shadow: 5px 5px 0 rgba(4, 36, 21, 0.42);
+      min-width: 0;
     }
 
-    .card h3 {
-      font-size: 0.75rem;
-      text-transform: uppercase;
-      letter-spacing: 0.1em;
-      color: var(--text-muted);
-      margin: 0 0 0.5rem 0;
-      font-weight: 600;
+    .card h2 {
+      margin: 0 0 0.7rem;
+      font-family: var(--mono);
+      font-size: 0.78rem;
+      font-weight: 700;
+      letter-spacing: 0.19em;
+      color: var(--green);
     }
 
-    .result-transcript {
-      font-size: 0.85rem;
-      color: var(--text-muted);
-      margin: 0 0 1.25rem 0;
-      font-style: italic;
-      opacity: 0.9;
+    /* Was a 3px border-left accent -- an Absolute Ban, and the detector
+       flagged it. A tinted quote block carries the same emphasis. */
+    .transcript {
+      margin: 0 0 1rem;
+      padding: 0.45rem 0.7rem;
+      font-size: 0.8rem;
+      letter-spacing: 0.02em;
+      color: var(--ink);
+      background: rgba(254, 225, 1, 0.34);
+      border-radius: 2px;
     }
 
+    /* Victor Mono for the answer is a deliberate call, not laziness: the
+       reference sets all its body copy in mono, and a grounded RAG answer
+       reading as quoted machine output is thematically right. It is only
+       legible at length with real leading and a bounded measure, so both
+       are set here and both are pinned by an acceptance criterion. */
     #answer {
-      font-size: 1.3rem;
-      color: #fff;
-      line-height: 1.65;
+      font-size: 0.94rem;
+      line-height: 1.78;
+      color: var(--ink);
+      max-width: 68ch;
     }
-
-    #answer p, .compare-column .answer p { margin: 0 0 0.85rem 0; }
-    #answer p:last-child, .compare-column .answer p:last-child { margin-bottom: 0; }
-    #answer strong, .compare-column .answer strong { color: var(--accent); font-weight: 600; }
+    #answer p { margin: 0 0 0.85rem; }
+    #answer p:last-child { margin-bottom: 0; }
+    #answer strong { color: var(--green); font-weight: 700; }
+    #answer ul { margin: 0 0 0.85rem; padding-left: 1.15rem; }
+    #answer li { margin-bottom: 0.3rem; }
     .answer-heading {
-      font-size: 1rem;
-      font-weight: 600;
-      color: #fff;
-      margin: 1.1rem 0 0.5rem 0;
+      font-family: var(--mono);
+      font-size: 0.92rem;
+      font-weight: 700;
+      line-height: 1.4;
+      color: var(--green);
+      margin: 1.15rem 0 0.45rem;
+      letter-spacing: 0.06em;
     }
     .answer-heading:first-child { margin-top: 0; }
-    #answer ul, .compare-column .answer ul { margin: 0 0 0.85rem 1.25rem; padding: 0; }
-    #answer li, .compare-column .answer li { margin-bottom: 0.35rem; }
-    .refusal { color: var(--red) !important; font-weight: 500; }
 
-    /* Latency bar chart -- label+value on one line, track full-width below,
-       so it reads cleanly whether it's sitting in a wide card or a narrow
-       sidebar/compare column. */
-    .latency-bar-row { padding: 0.5rem 0; font-variant-numeric: tabular-nums; font-size: 0.78rem; }
-    .latency-bar-topline { display: flex; justify-content: space-between; gap: 0.75rem; margin-bottom: 0.3rem; }
-    .latency-bar-label { color: var(--text-muted); }
-    .latency-bar-value { color: var(--text); }
-    .latency-bar-track { height: 6px; border-radius: 999px; background: var(--glass); border: 1px solid var(--glass-border); overflow: hidden; }
-    .latency-bar-fill { height: 100%; border-radius: 999px; background: var(--accent); transition: width 0.4s ease; }
-    .latency-bar-row.total {
-      margin-top: 0.4rem;
-      padding-top: 0.8rem;
-      border-top: 1px solid var(--glass-border);
-      font-weight: 600;
+    /* --- Refusal: a stamped verdict, not an error string --------------
+       Their गोवा blob treatment -- pink fill, white keyline, hard offset
+       shadow, slight rotation. A guardrail firing IS a stamp, so the
+       device is doing real work here rather than decorating.
+       Ink on pink measures 4.39:1, which clears AA only at large-bold, so
+       the chip is pinned at 14.4px/700 and never shrinks. Their own
+       yellow-on-pink is 2.87:1 and is not used for text anywhere. */
+    .refusal-block { display: flex; flex-direction: column; align-items: flex-start; gap: 0.5rem; }
+    .refusal-guard {
+      display: inline-block;
+      padding: 4px 13px;
+      border-radius: 999px;
+      background: var(--pink);
+      border: 2px solid #fff;
+      box-shadow: 3px 3px 0 var(--ink);
+      color: var(--ink);
+      font-size: 0.9rem;
+      font-weight: 700;
+      letter-spacing: 0.07em;
+      line-height: 1.3;
+      transform: rotate(-2deg);
     }
-    .latency-bar-row.total .latency-bar-label,
-    .latency-bar-row.total .latency-bar-value { color: #fff; }
+    .refusal-detail { color: var(--ink); font-weight: 500; }
+    .refusal-score, .score-note {
+      font-size: 0.75rem;
+      color: var(--green);
+      font-variant-numeric: tabular-nums;
+    }
+    .score-note { margin-top: 0.9rem; }
+    /* On the green ground (compare mode's shared refusal) rather than a card. */
+    #compareRefusal { color: var(--cream); margin: 0.4rem 0 0; }
 
-    /* Citations -- a responsive tile grid rather than a single-file list,
-       so the citations card actually uses the width it's given. */
+    /* --- Latency panel ------------------------------------------------
+       The precise numbers live here, always as horizontal text. The sun
+       carries the shape of the run; this carries the values, so making
+       the sun beautiful can never cost a number its legibility. */
+    .latency-bar-row { padding: 0.42rem 0; font-variant-numeric: tabular-nums; }
+    .latency-bar-topline {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 0.75rem;
+      margin-bottom: 0.28rem;
+    }
+    .latency-bar-label { font-size: 0.78rem; color: var(--green); line-height: 1.3; }
+    .latency-bar-value { font-size: 0.82rem; font-weight: 700; color: var(--ink); white-space: nowrap; }
+    .latency-bar-track {
+      height: 10px;
+      border: 1px solid var(--ink);
+      border-radius: 2px;
+      background: #fff;
+      overflow: hidden;
+    }
+    .latency-bar-fill { height: 100%; background: var(--green); transition: width 0.45s cubic-bezier(0.16, 1, 0.3, 1); }
+    .latency-bar-row.total { margin-top: 0.4rem; padding-top: 0.7rem; border-top: 2px solid var(--ink); }
+    .latency-bar-row.total .latency-bar-label { font-weight: 700; color: var(--ink); letter-spacing: 0.08em; }
+    .latency-bar-row.total .latency-bar-value { font-size: 0.95rem; }
+
+    /* --- Citations: beach-chit tickets -------------------------------- */
     #citations, .compare-column .citations {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-      gap: 0.75rem;
+      grid-template-columns: repeat(auto-fit, minmax(206px, 1fr));
+      gap: 0.7rem;
     }
     .citation-row {
-      padding: 0.85rem 1rem;
-      border: 1px solid var(--glass-border);
-      border-radius: 12px;
-      background: rgba(255, 255, 255, 0.02);
+      padding: 0.7rem 0.8rem;
+      background: #fff;
+      border: 1.5px solid var(--ink);
+      border-radius: 2px;
     }
-    .citation-header { display: flex; align-items: center; gap: 0.65rem; margin-bottom: 0.4rem; }
-    .citation-index { font-size: 0.72rem; font-weight: 600; color: var(--text-muted); white-space: nowrap; text-transform: uppercase; letter-spacing: 0.04em; }
+    .citation-header { display: flex; align-items: center; gap: 0.55rem; margin-bottom: 0.4rem; }
+    .citation-index {
+      flex: none;
+      padding: 1px 7px;
+      background: var(--yellow);
+      border: 1.5px solid var(--ink);
+      border-radius: 2px;
+      font-size: 0.75rem;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      color: var(--ink);
+      white-space: nowrap;
+    }
     .citation-relevance-track { flex: 1; }
-    .citation-text { margin: 0; font-size: 0.82rem; color: var(--text-muted); line-height: 1.5; }
-    .citations-empty { margin: 0; font-size: 0.85rem; color: var(--text-muted); font-style: italic; }
+    .citation-text { margin: 0; font-size: 0.78rem; line-height: 1.55; color: var(--ink); }
+    .citations-empty { margin: 0; font-size: 0.78rem; color: var(--green); font-style: italic; }
 
-    /* STATE MACHINE STYLES */
-    
-    /* State: idle */
-    body.state-idle .mic-status-text { opacity: 1; }
-    body.state-idle .mic-button {
-      animation: pulse-soft 3s infinite;
+    /* --- Compare: their hanging painted signboards --------------------
+       Boards hung from a bamboo rail, alternating yellow and cream, each
+       one a strategy. Column count comes from the response, since the
+       server chooses which strategies it compares. */
+    /* The rail is a real element, not a ::before stripe: the design detector
+       flags absolutely-positioned pseudo-element stripes as side-tabs, and a
+       bamboo rail the boards visibly hang from deserves to be in the markup
+       anyway. */
+    .compare-rail {
+      height: 9px;
+      margin-bottom: 21px;
+      background: var(--yellow);
+      border: 2px solid var(--ink);
+      border-radius: 5px;
+    }
+    .compare-grid {
+      position: relative;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(258px, 1fr));
+      gap: 1.1rem;
+    }
+    .compare-column { position: relative; }
+    .compare-column::before,
+    .compare-column::after {
+      content: "";
+      position: absolute;
+      top: -22px;
+      width: 2px;
+      height: 22px;
+      background: var(--ink);
+    }
+    .compare-column::before { left: 20%; }
+    .compare-column::after { right: 20%; }
+    /* Ink on yellow is 12.6:1, so the loud board is also the readable one.
+       The tilt lives in a custom property because the entry animation sets
+       `transform`, and a keyframe ending at translateY(0) would otherwise
+       wipe the rotation out for good. */
+    .compare-column { --tilt: 0deg; transform: rotate(var(--tilt)); }
+    .compare-column:nth-child(odd) { background: var(--yellow); --tilt: -0.55deg; }
+    .compare-column:nth-child(even) { background: var(--cream); --tilt: 0.45deg; }
+    .compare-column h2 {
+      display: flex;
+      align-items: baseline;
+      flex-wrap: wrap;
+      gap: 0.45rem;
+      font-size: 0.78rem;
+      letter-spacing: 0.1em;
+      color: var(--ink);
+      margin-bottom: 0.6rem;
+    }
+    .axis-badge {
+      font-size: 0.7rem;
+      font-weight: 700;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--ink);
+      border: 1.5px solid var(--ink);
+      border-radius: 2px;
+      padding: 1px 5px;
+    }
+    .compare-column .answer {
+      font-size: 0.86rem;
+      line-height: 1.7;
+      color: var(--ink);
+      margin: 0 0 0.85rem;
+      max-width: 68ch;
+    }
+    .compare-column .answer p { margin: 0 0 0.6rem; }
+    .compare-column .answer p:last-child { margin-bottom: 0; }
+    .compare-column .latency { margin-bottom: 0.9rem; }
+    /* On a yellow board the white ticket and track need the same ink edge
+       they have on cream -- they already do, so only the fill changes. */
+    .compare-column:nth-child(odd) .latency-bar-label,
+    .compare-column:nth-child(odd) .citations-empty { color: var(--ink); }
+
+    /* --- Ground art ---------------------------------------------------
+       Their palm-and-floral frame, pinned to the bottom of the viewport so
+       the page reads as a poster with no dead space. The top edge is
+       masked to a gradient so it fades into the body green rather than
+       showing a seam wherever the JPEG's green lands. */
+    .ground-art {
+      position: fixed;
+      left: 0; right: 0; bottom: 0;
+      height: min(46vh, 380px);
+      background: url("/static/assets/palm-frame.jpg") center bottom / 100% auto no-repeat;
+      /* Held at 0.62 and faded from the top for two reasons: it has to read as
+         ambient ground rather than competing foreground, and their JPEG's green
+         is a shade off our --green, which would otherwise show as a hard seam
+         across the viewport. Fading it solves both without touching the art. */
+      opacity: 0.62;
+      -webkit-mask-image: linear-gradient(to bottom, transparent 0%, #000 42%);
+      mask-image: linear-gradient(to bottom, transparent 0%, #000 42%);
+      pointer-events: none;
+      z-index: 0;
     }
 
-    /* State: recording */
-    body.state-recording .mic-status-text { opacity: 1; color: var(--red); }
-    body.state-recording .mic-button {
-      transform: scale(1.1);
-      background: rgba(239, 68, 68, 0.15);
-      border-color: rgba(239, 68, 68, 0.4);
-      color: var(--red);
-      box-shadow: 0 0 40px rgba(239, 68, 68, 0.2);
+    .footer {
+      flex: none;
+      position: relative;
+      z-index: 3;
+      margin-top: auto;
     }
+    /* Solid bar, not transparent: the credit sat directly on top of the
+       illustration's floral strip and was unreadable. */
+    .credit {
+      margin: 0;
+      padding: 0.75rem 1rem;
+      background: var(--ink);
+      text-align: center;
+      font-size: 0.74rem;
+      font-weight: 500;
+      letter-spacing: 0.12em;
+      color: var(--cream);
+    }
+    .credit b { color: var(--yellow); font-weight: 700; }
+
+    /* --- States ------------------------------------------------------- */
+    body.state-idle .status-line,
+    body.state-idle .mic-hint { opacity: 1; }
+
+    body.state-recording .status-line { opacity: 1; color: var(--pink); }
     body.state-recording .visualizer-canvas { opacity: 1; }
+    body.state-recording .sun-disc { animation: sun-beat 1.6s ease-in-out infinite; }
 
-    /* State: processing */
-    body.state-processing .mic-button {
-      animation: spin-pulse 1.5s infinite cubic-bezier(0.4, 0, 0.2, 1);
-      background: rgba(99, 102, 241, 0.15);
-      border-color: rgba(99, 102, 241, 0.4);
-      color: var(--accent);
-    }
-    body.state-processing .mic-status-text { opacity: 1; }
-    body.state-processing .output-container { opacity: 0.5; }
-    body.state-processing .result-answer-card,
-    body.state-processing .result-latency-card,
-    body.state-processing .result-citations-card,
-    body.state-processing .compare-column { opacity: 0; }
+    body.state-processing .status-line { opacity: 1; color: var(--yellow); }
+    body.state-processing .ray { animation: ray-sweep 1.5s ease-in-out infinite; }
 
-    /* State: done -- each card/column reveals with its own delay, so the
-       whole dashboard cascades in as one orchestrated sequence instead of
-       everything popping in at once. */
-    body.state-done .output-container {
-      opacity: 1;
-      transform: translateY(0);
-    }
-    body.state-done .result-answer-card,
-    body.state-done .result-latency-card,
-    body.state-done .result-citations-card,
-    body.state-done .compare-column {
-      animation: reveal 0.6s cubic-bezier(0.16, 1, 0.3, 1) both;
-    }
-    body.state-done .result-latency-card { animation-delay: 0.08s; }
-    body.state-done .result-citations-card { animation-delay: 0.16s; }
+    body.state-done .output-container,
+    body.state-error .output-container { opacity: 1; }
+    /* :not(.compare-column) -- the boards need the tilt-preserving keyframe
+       below, not this one. */
+    body.state-done .card:not(.compare-column) { animation: rise 0.6s cubic-bezier(0.16, 1, 0.3, 1) both; }
+    body.state-done .card-latency { animation-delay: 0.07s; }
+    body.state-done .card-cites { animation-delay: 0.14s; }
+    body.state-done .compare-column { animation: board-drop 0.5s cubic-bezier(0.16, 1, 0.3, 1) both; }
     body.state-done .compare-column:nth-child(2) { animation-delay: 0.06s; }
     body.state-done .compare-column:nth-child(3) { animation-delay: 0.12s; }
     body.state-done .compare-column:nth-child(4) { animation-delay: 0.18s; }
 
-    /* State: error */
-    body.state-error .mic-button { border-color: var(--red); color: var(--red); }
-    body.state-error .output-container { opacity: 1; transform: translateY(0); }
+    body.state-error .status-line { opacity: 1; color: var(--pink); }
 
-    /* Animations */
-    @keyframes pulse-soft {
-      0% { box-shadow: 0 0 0 0 rgba(255,255,255,0.05); }
-      70% { box-shadow: 0 0 0 20px rgba(255,255,255,0); }
-      100% { box-shadow: 0 0 0 0 rgba(255,255,255,0); }
+    @keyframes sun-beat {
+      0%, 100% { transform: scale(1); }
+      50% { transform: scale(1.045); }
     }
-    @keyframes spin-pulse {
-      0% { transform: scale(1); box-shadow: 0 0 20px var(--accent-glow); }
-      50% { transform: scale(0.95); box-shadow: 0 0 40px var(--accent-glow); }
-      100% { transform: scale(1); box-shadow: 0 0 20px var(--accent-glow); }
+    @keyframes ray-sweep {
+      0%, 100% { opacity: 0.2; }
+      50% { opacity: 0.75; }
     }
-    @keyframes reveal {
-      from { opacity: 0; filter: blur(4px); transform: translateY(10px); }
-      to { opacity: 1; filter: blur(0); transform: translateY(0); }
+    @keyframes rise {
+      from { opacity: 0; transform: translateY(14px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    /* Boards settle onto the rail; the tilt rides through both keyframes. */
+    @keyframes board-drop {
+      from { opacity: 0; transform: translateY(-12px) rotate(var(--tilt)); }
+      to { opacity: 1; transform: translateY(0) rotate(var(--tilt)); }
+    }
+
+    /* --- Responsive --------------------------------------------------- */
+    @media (max-width: 620px) {
+      .topbar { justify-content: center; padding-bottom: 0.6rem; }
+      .strategy-rack { max-width: 100%; }
+      /* The `split` axis carries four strategies in one nowrap row, which
+         overflowed a 390px viewport by 16px. Let the axis wrap its own pills. */
+      .axis { flex-wrap: wrap; justify-content: center; }
+      .strategy-rack label { font-size: 0.72rem; padding: 3px 7px; }
+      .ground-art { height: min(34vh, 260px); }
+      #answer { font-size: 0.9rem; }
+    }
+
+    /* --- Motion off ---------------------------------------------------- */
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation-duration: 0.001ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.001ms !important;
+      }
     }
   </style>
 </head>
 <body class="state-idle">
-  
-  <div class="header">
-    <div class="strategy-group" id="strategyChoices">
-      <span style="font-size: 0.8rem; padding: 6px 16px; color: var(--text-muted);">Loading...</span>
+
+  <div class="tile-strip" aria-hidden="true"></div>
+
+  <header class="topbar">
+    <div class="wordmark">VOICE&nbsp;RAG <span>/ TASK 02</span></div>
+
+    <div class="strategy-rack" id="strategyChoices">
+      <span class="axis-name">LOADING</span>
     </div>
+
     <label class="compare-toggle">
       <input type="checkbox" id="compareToggle">
-      <span>Compare strategies</span>
+      <span>COMPARE</span>
     </label>
-  </div>
+  </header>
 
-  <div class="mic-container">
-    <div id="statusText" class="mic-status-text" aria-live="polite">Hold to speak</div>
-    <canvas id="visualizer" class="visualizer-canvas" width="300" height="300"></canvas>
-
-    <button id="recordBtn" class="mic-button" aria-label="Hold to record">
-      <svg viewBox="0 0 24 24">
-        <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z"/>
-        <path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/>
-      </svg>
-    </button>
-
-    <div class="mic-hint">hold <kbd>Space</kbd> · <kbd>Esc</kbd> to cancel</div>
-  </div>
-
-  <div class="output-container" id="outputContainer">
-    <div class="card result-answer-card">
-      <p id="transcript" class="result-transcript"></p>
-      <h3>Answer</h3>
-      <div id="answer" aria-live="polite"></div>
-      <!-- The retrieval score against the threshold it had to clear, shown on
-           successful answers too, not only refusals. -->
-      <div id="answerScore" class="refusal-score" style="display: none;"></div>
+  <main class="stage">
+    <div class="hero">
+      <h1 class="hero-title">Ask out loud</h1>
+      <p class="hero-sub" id="heroSub">
+        <b>10</b> CHUNKING STRATEGIES · <b>5</b> AXES · <b>3</b> GUARDRAILS · RETRIEVAL P50 <b>129&nbsp;MS</b>
+      </p>
     </div>
 
-    <div class="card result-latency-card">
-      <h3>Latency</h3>
-      <div id="latency"></div>
+    <div class="sun-stage">
+      <div id="statusText" class="status-line" aria-live="polite">HOLD TO SPEAK</div>
+      <div class="mic-hint">hold <kbd>SPACE</kbd> · <kbd>ESC</kbd> to cancel</div>
+
+      <div class="sun-wrap">
+        <!-- The sun IS the pipeline: one ray per stage, lit and sized from
+             the response's own stages_ms. Built in app.js so the ray set
+             always matches the stages the server actually reported. -->
+        <svg class="sun-svg" id="sunSvg" viewBox="0 28 400 162" aria-hidden="true" preserveAspectRatio="xMidYMax meet">
+          <line class="horizon" x1="8" y1="170" x2="392" y2="170" />
+          <g id="rayGroup"></g>
+          <path class="sun-glare" d="M118,170 A82,82 0 0,1 282,170 Z" />
+          <path class="sun-disc" id="sunDisc" d="M160,170 A40,40 0 0,1 240,170 Z" />
+        </svg>
+
+        <canvas id="visualizer" class="visualizer-canvas" width="340" height="54"></canvas>
+
+        <button id="recordBtn" class="sun-hit" aria-label="Hold to record a question">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z"/>
+            <path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/>
+          </svg>
+        </button>
+      </div>
     </div>
 
-    <div class="card result-citations-card">
-      <h3>Citations</h3>
-      <div id="citations"></div>
-    </div>
-  </div>
+    <div class="output-container" id="outputContainer">
+      <div class="card card-answer">
+        <p id="transcript" class="transcript"></p>
+        <h2>Answer</h2>
+        <div id="answer" aria-live="polite"></div>
+        <div id="answerScore" class="score-note" style="display: none;"></div>
+      </div>
 
-  <div class="output-container" id="compareContainer">
-    <div class="card">
-      <p id="compareTranscript" class="result-transcript"></p>
-      <p id="compareRefusal" class="refusal" style="display: none;" aria-live="polite"></p>
+      <div class="card card-latency">
+        <h2>Latency</h2>
+        <div id="latency"></div>
+      </div>
+
+      <div class="card card-cites">
+        <h2>Citations</h2>
+        <div id="citations"></div>
+      </div>
     </div>
 
-    <!-- Columns are built from the response: /api/compare decides which
-         strategies it compares, and hardcoding them here meant a change to
-         that set silently broke this view. -->
-    <div class="compare-grid"></div>
-  </div>
+    <div class="output-container" id="compareContainer">
+      <div class="card">
+        <p id="compareTranscript" class="transcript"></p>
+        <p id="compareRefusal" class="refusal" style="display: none;" aria-live="polite"></p>
+      </div>
+      <div class="compare-rail" aria-hidden="true"></div>
+      <div class="compare-grid"></div>
+    </div>
+  </main>
+
+  <footer class="footer">
+    <div class="tile-strip" aria-hidden="true"></div>
+    <p class="credit">Built for <b>Hacker House Goa 2026</b> · #RAGInGoa</p>
+  </footer>
+
+  <div class="ground-art" aria-hidden="true"></div>
 
   <script src="/static/app.js"></script>
 </body>
