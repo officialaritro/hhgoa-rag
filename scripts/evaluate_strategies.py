@@ -550,8 +550,11 @@ def write_report() -> None:
             "",
             "| candidate depth | recall@1 | recall@5 | MRR@10 | rerank P50 |",
             "|---|---|---|---|---|",
-            f"| *none (dense order)* | *{rr['baseline_recall@1']:.3f}* | "
-            f"*{rr['baseline_recall@5']:.3f}* | *{rr['baseline_mrr@10']:.3f}* | *0 ms* |",
+            (
+                f"| *none (dense order)* | *{rr['baseline_recall@1']:.3f}* | "
+                f"*{rr['baseline_recall@5']:.3f}* | "
+                f"*{rr['baseline_mrr@10']:.3f}* | *0 ms* |"
+            ),
         ]
         for row in rr["reranked"]:
             lines.append(
@@ -561,8 +564,11 @@ def write_report() -> None:
         best = max(rr["reranked"], key=lambda r: r["recall@1"])
         lines += [
             "",
-            f"**recall@5 goes {rr['baseline_recall@5']:.3f} to "
-            f"{max(r['recall@5'] for r in rr['reranked']):.3f}.** That is +6.8 points, well",
+            (
+                f"**recall@5 goes {rr['baseline_recall@5']:.3f} to "
+                f"{max(r['recall@5'] for r in rr['reranked']):.3f}.** That is +6.8 "
+                f"points, well"
+            ),
             "outside the ~1.6pp standard error at this sample size -- and far larger than",
             "anything the chunking slate achieved. `fusion`, the best chunking-side result,",
             "reached 0.854, which is *inside* that error bar against plain dense retrieval.",
