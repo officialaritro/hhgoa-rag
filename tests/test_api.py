@@ -172,7 +172,10 @@ def test_strategies_endpoint_lists_every_registered_strategy():
     # Measurement controls are built and evaluated but must not be offered as
     # something to retrieve from -- query_aware_heldout exists only to answer a
     # question about query_aware, and its own threshold is not meaningful.
-    assert set(body["strategies"]) < set(dense_names())
+    assert "query_aware_heldout" in set(dense_names())
+    assert "query_aware_heldout" not in set(body["strategies"])
+    # Composed strategies are servable without an index of their own.
+    assert {"hybrid", "fusion"} <= set(body["strategies"])
     assert body["default"] in body["strategies"]
 
 

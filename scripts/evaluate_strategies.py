@@ -37,13 +37,14 @@ import sys
 import time
 from pathlib import Path
 
-from app.strategies import chunk_paths, dense_names, get
+from app.strategies import chunk_paths, dense_names, get, names
 
 CORPUS_PATH = "data/corpus.jsonl"
 PASSAGE_STORE = "data/passages.pkl"
 QUERY_VECTORS = "data/eval_queries.f32"
 REPORT_PATH = "docs/CHUNKING_REPORT.md"
 DEPTH = 10
+QUERIES: list[str] = []
 
 
 # --------------------------------------------------------------------- metrics
@@ -142,6 +143,7 @@ def _phase_embed(sample: int, seed: int) -> None:
                     [p["text"] for p in r["passages"] if p["is_selected"]]
                     for r in picked
                 ],
+                "queries": [r["query"] for r in picked],
                 "embed_ms_p50": round(statistics.median(per_query_ms), 2),
                 "embed_ms_p100": round(max(per_query_ms), 2),
             }
@@ -244,9 +246,102 @@ def _phase_measure() -> None:
             + ("  [held-out]" if held_out else "")
         )
 
+    # Composed strategies: same 500 queries, same merge the service performs.
+    global QUERIES
+    QUERIES = meta.get("queries", [])
+    from app.lexical import BM25Index
+
+    bm25 = None
+    if Path("data/bm25_passages.pkl").exists():
+        bm25 = BM25Index.load("data/bm25_passages.pkl")
+    indexes = {}
+    for name in dense_names():
+        index_path, metadata_path = chunk_paths(name)
+        if Path(index_path).exists():
+            indexes[name] = (
+                faiss.read_index(index_path),
+                pickle.loads(Path(metadata_path).read_bytes()),
+            )
+    for name in names():
+        spec = get(name)
+        if spec.kind == "dense":
+            continue
+        if any(m not in indexes for m in spec.members):
+            continue
+        if spec.kind == "hybrid" and bm25 is None:
+            print(f"  {name:<17} skipped -- run scripts.build_lexical")
+            continue
+        per_query, search_ms = _composed_per_query(
+            name, vectors, count, labels, passages, indexes, bm25
+        )
+        results.append(
+            {
+                "strategy": name,
+                "axis": spec.axis,
+                "held_out": False,
+                "chunks": sum(indexes[m][0].ntotal for m in spec.members),
+                "index_mb": 0.0,
+                "metadata_mb": 0.0,
+                "threshold": None,
+                "false_refusal": None,
+                "leaks": None,
+                "recall@1": recall_at_k(per_query, 1),
+                "recall@5": recall_at_k(per_query, 5),
+                "recall@10": recall_at_k(per_query, 10),
+                "mrr@10": mrr_at_k(per_query, 10),
+                "ndcg@10": ndcg_at_k(per_query, 10),
+                "search_ms_p50": statistics.median(search_ms),
+                "search_ms_p100": max(search_ms),
+            }
+        )
+        print(
+            f"  {name:<17} recall@5 {results[-1]['recall@5']:.3f}  "
+            f"mrr@10 {results[-1]['mrr@10']:.3f}  "
+            f"search P50 {results[-1]['search_ms_p50']:.2f}ms"
+        )
+
     Path("data/eval_results.json").write_text(
         json.dumps({"queries": count, "embed": meta, "results": results}, indent=2)
     )
+
+
+def _composed_per_query(name, vectors, count, labels, passages, indexes, bm25):
+    """Evaluates hybrid/fusion by reproducing app/retrieval.py's merge here.
+
+    Duplicating the merge rather than calling retrieve() is deliberate: retrieve
+    embeds the query itself, which would pull torch into this faiss-only process
+    and segfault. The logic is small and the alternative is a third process.
+    """
+    from app.fusion import reciprocal_rank_fusion
+
+    spec = get(name)
+    depth = DEPTH * 4
+    per_query = []
+    search_ms = []
+    for i in range(count):
+        query_vector = vectors[i : i + 1]
+        start = time.perf_counter()
+        rankings = []
+        for member in spec.members:
+            index, rows = indexes[member]
+            _, ids = index.search(query_vector, depth)
+            ordered, seen = [], set()
+            for row_id in ids[0]:
+                if row_id < 0:
+                    continue
+                parent_id = rows[row_id]["parent_id"]
+                if parent_id in seen:
+                    continue
+                seen.add(parent_id)
+                ordered.append(parent_id)
+            rankings.append(ordered)
+        if spec.kind == "hybrid":
+            rankings.append([pid for pid, _ in bm25.top_k(QUERIES[i], depth)])
+        fused = reciprocal_rank_fusion(rankings)
+        search_ms.append((time.perf_counter() - start) * 1000)
+        sources = [passages[pid]["text"] for pid, _ in fused[:DEPTH]]
+        per_query.append((sources, labels[i]))
+    return per_query, search_ms
 
 
 def write_report() -> None:
@@ -293,10 +388,45 @@ def write_report() -> None:
         "See the note below the table -- this was the single most misleading result in the",
         "set, and it was wrong in both directions before being pinned down.",
         "",
-        "**Recommended default: `whole_passage` or `fixed_size`.** Tied-best recall,",
-        "essentially tied-best MRR, the smallest index of the competitive strategies, fast",
-        "search, and the fewest off-topic leaks (1 of 8). They are interchangeable, which is",
-        "itself the first finding restated.",
+        "**Fusing granularities is the only thing that beat a plain passage.** `fusion`",
+        "merges whole passages, 200-character children and single sentences by reciprocal",
+        "rank and reaches 0.854 recall@5, the best number here. The margin over",
+        "`whole_passage` is 0.6 points, which on 500 queries is three queries -- real but",
+        "small, and it costs 45 ms of search against 6.7 ms. Members were chosen for",
+        "diversity of failure mode rather than individual score: fusing the three",
+        "strategies that already tie each other would have added nothing.",
+        "",
+        "**Lexical fusion is a negative result.** `hybrid` scores 0.740, ten points *below*",
+        "dense alone. BM25 by itself reaches only 0.558, and a weight sweep shows fusion",
+        "stops hurting only once the lexical ranking is weighted almost to zero:",
+        "",
+        "| lexical weight | recall@5 |",
+        "|---|---|",
+        "| 1.0 (standard RRF) | 0.740 |",
+        "| 0.5 | 0.790 |",
+        "| 0.2 | 0.820 |",
+        "| 0.1 | 0.840 |",
+        "| 0.05 | 0.850 |",
+        "| *dense alone, no fusion* | *0.848* |",
+        "",
+        "0.850 against 0.848 is one query inside the noise. `hybrid` therefore ships at",
+        "equal weight, because that is what hybrid retrieval means and the honest answer is",
+        "that it does not help here; tuning to 0.05 would produce a number that looks like",
+        "a tie while having switched lexical retrieval off.",
+        "",
+        "The cause is the corpus rather than the implementation. These are",
+        "natural-language questions against short web passages, and an answer rarely",
+        "repeats its question's words -- exactly the vocabulary gap dense retrieval exists",
+        "to close. BM25's reputation on MS MARCO comes from official document ranking with",
+        "tuned stemming and stopword handling; neither is present here, and at a 0.558",
+        "starting point preprocessing would not close a 29-point gap.",
+        "",
+        "**Recommended default: `whole_passage` or `fixed_size`.** Tied-best recall among",
+        "the single strategies, essentially tied-best MRR, the smallest competitive index,",
+        "6.7 ms search, and the fewest off-topic leaks (1 of 8). They are interchangeable,",
+        "which is the first finding restated. `fusion` is the quality ceiling if 45 ms of",
+        "search is acceptable, but 0.854 against 0.848 does not justify making it the",
+        "default for a voice demo where the dominant cost is elsewhere entirely.",
         "",
         "## Retrieval quality",
         "",
@@ -350,18 +480,27 @@ def write_report() -> None:
         "|---|---|---|---|---|---|---|",
     ]
     for r in results:
+        # Composed strategies own no index and no manifest: they inherit their
+        # primary member's threshold, so those cells are not theirs to report.
+        if r["threshold"] is None:
+            lines.append(
+                f"| `{r['strategy']}` | {r['chunks']:,} (shared) | - | - | "
+                f"inherited | - | - |"
+            )
+            continue
         lines.append(
             f"| `{r['strategy']}` | {r['chunks']:,} | {r['index_mb']:.1f} | "
             f"{r['metadata_mb']:.1f} | {r['threshold']:.3f} | "
             f"{100 * r['false_refusal']:.1f}% | {r['leaks']} |"
         )
 
-    total_chunks = sum(r["chunks"] for r in results)
-    total_mb = sum(r["index_mb"] + r["metadata_mb"] for r in results)
+    own = [r for r in results if r["threshold"] is not None]
+    total_chunks = sum(r["chunks"] for r in own)
+    total_mb = sum(r["index_mb"] + r["metadata_mb"] for r in own)
     lines += [
         "",
         (
-            f"**{total_chunks:,} vectors across {len(results)} indices, "
+            f"**{total_chunks:,} vectors across {len(own)} indices, "
             f"{total_mb:.0f} MB total.**"
         ),
         "Chunk metadata is span-addressed -- `(parent_id, start, end)` into one shared",

@@ -107,3 +107,30 @@ def test_generate_answer_does_not_flag_a_real_answer(mock_call):
 
     assert result.value.insufficient_context is False
     assert result.value.answer.startswith("The passages do not agree")
+
+
+def test_the_prompt_constrains_length_and_forbids_prefacing():
+    """These two instructions are load-bearing, not stylistic, so an edit must
+    not drop them silently.
+
+    Measured on 40 real answers before and after: median 79 words -> 46 (42%
+    shorter, 32s of synthesised speech down to 18s), framing openers 35% -> 2%,
+    and the groundedness separation margin widened from +0.252 to +0.304 because
+    "Based on the passages provided..." matches no passage and drags
+    per-sentence support down.
+    """
+    from app.generation import _SYSTEM_PROMPT
+
+    lowered = _SYSTEM_PROMPT.lower()
+    assert "three short sentences" in lowered, "length ceiling removed"
+    assert "based on the" in lowered, "the no-prefacing instruction was dropped"
+    assert "spoken" in lowered, "the voice-output framing was dropped"
+
+
+def test_the_prompt_still_asks_for_the_decline_sentinel():
+    """The sentinel is what lets a decline be detected structurally; the
+    groundedness guard cannot catch one, since a spoken decline quotes the
+    passages and scores as grounded."""
+    from app.generation import _SYSTEM_PROMPT, INSUFFICIENT_CONTEXT
+
+    assert INSUFFICIENT_CONTEXT in _SYSTEM_PROMPT

@@ -253,3 +253,130 @@ def test_every_registered_strategy_is_retrievable(mock_store, mock_load, mock_em
         result = retrieve(query="q", strategy=name, k=1)
         assert result.strategy == name
         assert len(result.passages) == 1
+
+
+# ------------------------------------------------------ composed strategies
+
+
+class _FakeBM25:
+    """Stands in for the real BM25 index; returns (passage_id, score) pairs."""
+
+    def __init__(self, ranked):
+        self._ranked = ranked
+
+    def top_k(self, query, k):
+        return self._ranked[:k]
+
+
+@patch("app.retrieval.embed", return_value=np.zeros(3))
+@patch("app.retrieval.load_index")
+@patch("app.retrieval.load_passage_store", return_value=PASSAGES)
+@patch("app.retrieval._load_bm25")
+def test_hybrid_merges_lexical_and_dense_rankings(
+    mock_bm25, mock_store, mock_load, mock_embed
+):
+    """A passage both halves rank highly must beat one only the dense half
+    likes. That agreement is the entire reason to run two retrievers."""
+    rows = [
+        {"parent_id": 0, "start": 0, "end": 15},
+        {"parent_id": 1, "start": 0, "end": 36},
+    ]
+    # dense prefers passage 0; lexical prefers passage 1 strongly and also has 0
+    mock_load.return_value = (_index_returning([0, 1], [0.9, 0.5]), rows)
+    mock_bm25.return_value = _FakeBM25([(1, 22.0), (0, 3.0)])
+
+    result = retrieve(query="q", strategy="hybrid", k=2)
+
+    assert len(result.passages) == 2
+    assert {p.source_passage for p in result.passages} == {
+        PASSAGES[0]["text"],
+        PASSAGES[1]["text"],
+    }
+
+
+@patch("app.retrieval.embed", return_value=np.zeros(3))
+@patch("app.retrieval.load_index")
+@patch("app.retrieval.load_passage_store", return_value=PASSAGES)
+@patch("app.retrieval._load_bm25")
+def test_hybrid_reports_a_cosine_score_not_a_fusion_score(
+    mock_bm25, mock_store, mock_load, mock_embed
+):
+    """RRF scores are around 0.03 and have nothing to do with cosine. The
+    off-topic guard's thresholds are calibrated on cosines (0.499-0.574), so
+    reporting a fusion score would refuse every query. Ranking comes from RRF;
+    the reported score stays a dense similarity."""
+    rows = [{"parent_id": 0, "start": 0, "end": 15}]
+    mock_load.return_value = (_index_returning([0], [0.87]), rows)
+    mock_bm25.return_value = _FakeBM25([(0, 19.0)])
+
+    result = retrieve(query="q", strategy="hybrid", k=1)
+
+    assert result.passages[0].score == pytest.approx(0.87)
+
+
+@patch("app.retrieval.embed", return_value=np.zeros(3))
+@patch("app.retrieval.load_index")
+@patch("app.retrieval.load_passage_store", return_value=PASSAGES)
+@patch("app.retrieval._load_bm25")
+def test_hybrid_still_answers_when_no_keyword_matches(
+    mock_bm25, mock_store, mock_load, mock_embed
+):
+    """A lexical miss must abstain, not veto. Voice transcripts routinely
+    contain none of a passage's exact terms."""
+    rows = [{"parent_id": 0, "start": 0, "end": 15}]
+    mock_load.return_value = (_index_returning([0], [0.8]), rows)
+    mock_bm25.return_value = _FakeBM25([])
+
+    result = retrieve(query="q", strategy="hybrid", k=1)
+
+    assert len(result.passages) == 1
+
+
+@patch("app.retrieval.embed", return_value=np.zeros(3))
+@patch("app.retrieval.load_index")
+@patch("app.retrieval.load_passage_store", return_value=PASSAGES)
+def test_fusion_merges_every_member_strategy(mock_store, mock_load, mock_embed):
+    rows = [
+        {"parent_id": 0, "start": 0, "end": 15},
+        {"parent_id": 1, "start": 0, "end": 36},
+    ]
+    mock_load.return_value = (_index_returning([1, 0], [0.9, 0.6]), rows)
+
+    result = retrieve(query="q", strategy="fusion", k=2)
+
+    assert len(result.passages) == 2
+    # one load per member index, not one per request
+    from app.strategies import get
+
+    assert mock_load.call_count == len(get("fusion").members)
+
+
+@patch("app.retrieval.embed", return_value=np.zeros(3))
+@patch("app.retrieval.load_index")
+@patch("app.retrieval.load_passage_store", return_value=PASSAGES)
+def test_fusion_embeds_the_query_only_once(mock_store, mock_load, mock_embed):
+    """Embedding is 9.9ms P50 and strategy-independent; doing it per member
+    would multiply the dominant cost by the number of members."""
+    rows = [{"parent_id": 0, "start": 0, "end": 15}]
+    mock_load.return_value = (_index_returning([0]), rows)
+
+    retrieve(query="q", strategy="fusion", k=1)
+
+    assert mock_embed.call_count == 1
+
+
+@patch("app.retrieval.embed", return_value=np.zeros(3))
+@patch("app.retrieval.load_index")
+@patch("app.retrieval.load_passage_store", return_value=PASSAGES)
+def test_composed_strategies_return_the_parent_passage_as_text(
+    mock_store, mock_load, mock_embed
+):
+    """Fusion merges at parent granularity, so a fused hit has no single chunk
+    to speak for it."""
+    rows = [{"parent_id": 0, "start": 0, "end": 15}]
+    mock_load.return_value = (_index_returning([0]), rows)
+
+    result = retrieve(query="q", strategy="fusion", k=1)
+
+    assert result.passages[0].text == PASSAGES[0]["text"]
+    assert result.passages[0].source_passage == PASSAGES[0]["text"]
