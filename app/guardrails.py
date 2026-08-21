@@ -103,8 +103,19 @@ def offtopic_threshold(strategy: str, index_path: str | None = None) -> float:
             pass
 
     if index_path is None:
-        from app.strategies import chunk_paths
+        from app.strategies import UnknownStrategy, chunk_paths, get
 
+        # A composed strategy (hybrid, fusion) has no index and so no manifest.
+        # It reports a dense cosine taken from its member indices -- ranking
+        # comes from RRF, the score does not -- so the primary member's measured
+        # threshold is the correct gate. Without this the guard raises on every
+        # composed request.
+        try:
+            spec = get(strategy)
+        except UnknownStrategy:
+            spec = None
+        if spec is not None and spec.members:
+            return offtopic_threshold(spec.members[0])
         index_path = chunk_paths(strategy)[0]
     manifest = Path(index_path).with_suffix(".manifest.json")
     if not manifest.exists():

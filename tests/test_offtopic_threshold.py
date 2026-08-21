@@ -82,3 +82,31 @@ def test_threshold_is_read_from_disk_only_once(tmp_path, monkeypatch):
     assert offtopic_threshold("recursive", index_path=path) == 0.531
     Path(path).with_suffix(".manifest.json").unlink()
     assert offtopic_threshold("recursive", index_path=path) == 0.531
+
+
+def test_a_composed_strategy_inherits_its_primary_member_threshold(monkeypatch):
+    """hybrid and fusion have no index of their own, so no manifest to read.
+
+    They report a dense cosine drawn from their member indices -- ranking comes
+    from RRF, the score does not -- so the member's calibrated threshold is the
+    right gate. Without this the guard raises MissingCalibration on every
+    composed request.
+    """
+    from app.strategies import get
+
+    monkeypatch.delenv("OFFTOPIC_SIMILARITY_THRESHOLD_HYBRID", raising=False)
+    offtopic_threshold.cache_clear()
+    try:
+        primary = get("hybrid").members[0]
+        assert offtopic_threshold("hybrid") == offtopic_threshold(primary)
+    finally:
+        offtopic_threshold.cache_clear()
+
+
+def test_a_composed_strategy_can_still_be_overridden_by_environment(monkeypatch):
+    monkeypatch.setenv("OFFTOPIC_SIMILARITY_THRESHOLD_FUSION", "0.61")
+    offtopic_threshold.cache_clear()
+    try:
+        assert offtopic_threshold("fusion") == 0.61
+    finally:
+        offtopic_threshold.cache_clear()

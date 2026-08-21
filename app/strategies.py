@@ -159,6 +159,31 @@ _REGISTRY: dict[str, Strategy] = {
         # passages. Only its recall against the held-out queries is valid.
         served=False,
     ),
+    "hybrid": Strategy(
+        name="hybrid",
+        kind="hybrid",
+        axis="fusion",
+        description=(
+            "BM25 keyword search fused with dense retrieval over whole passages "
+            "by reciprocal rank. Measured as a NEGATIVE result on this corpus: "
+            "BM25 alone reaches 0.558 recall@5 against dense's 0.848, and equal-"
+            "weight fusion costs 10.8 points. Kept because the finding is the "
+            "point, not because it is the best option."
+        ),
+        members=("whole_passage",),
+    ),
+    "fusion": Strategy(
+        name="fusion",
+        kind="fusion",
+        axis="fusion",
+        description=(
+            "Reciprocal rank fusion across three granularities -- whole "
+            "passages, 200-character children, single sentences. Chosen for "
+            "diversity of failure mode rather than individual score, since "
+            "fusing near-identical rankings adds nothing."
+        ),
+        members=("whole_passage", "parent_child", "sentence_window"),
+    ),
     "query_group": Strategy(
         name="query_group",
         kind="dense",
